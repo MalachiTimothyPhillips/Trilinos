@@ -263,6 +263,9 @@ namespace MueLuTests {
       paramList.set("chebyshev: min eigenvalue", (double) 1.0);
       paramList.set("chebyshev: ratio eigenvalue", (double) 20);
       paramList.set("chebyshev: zero starting solution", false);
+      paramList.set("debug", true);
+      //paramList.set("chebyshev: fourth kind algorithm", true);
+      paramList.set("chebyshev: textbook algorithm", true);
       Ifpack2Smoother smoother("CHEBYSHEV",paramList);
 
       typename Teuchos::ScalarTraits<SC>::magnitudeType residualNorms = testApply_A125_X1_RHS0(smoother, out, success);
@@ -592,8 +595,7 @@ namespace MueLuTests {
     }
   }
 
-
-
+#if 0
 #define MUELU_ETI_GROUP(SC,LO,GO,NO) \
   TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(Ifpack2Smoother,NotSetup,SC,LO,GO,NO) \
   TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(Ifpack2Smoother,HardCodedResult_Jacobi,SC,LO,GO,NO) \
@@ -606,6 +608,11 @@ namespace MueLuTests {
   TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(Ifpack2Smoother,TriDiRelaxation,SC,LO,GO,NO) \
   TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(Ifpack2Smoother,BlockRelaxation_Autosize,SC,LO,GO,NO) \
   TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(Ifpack2Smoother,BlockCrsMatrix_Relaxation,SC,LO,GO,NO)
+#endif
+
+#define MUELU_ETI_GROUP(SC,LO,GO,NO) \
+  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(Ifpack2Smoother,NotSetup,SC,LO,GO,NO) \
+  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(Ifpack2Smoother,HardCodedResult_Chebyshev,SC,LO,GO,NO) \
 
 #include <MueLu_ETI_4arg.hpp>
 

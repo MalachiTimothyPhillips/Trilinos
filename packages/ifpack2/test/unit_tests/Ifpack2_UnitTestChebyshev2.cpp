@@ -468,6 +468,7 @@ TEUCHOS_UNIT_TEST(Ifpack2Chebyshev, Convergence)
   // min eigenvalue and the min / max eigenvalue ratio.
   params.set ("chebyshev: eigenvalue max iterations", numEigIters);
   params.set ("chebyshev: degree", numIters);
+  //params.set ("chebyshev: max eigenvalue", lambdaMax);
   params.set ("chebyshev: max eigenvalue", lambdaMax);
 
   // Create the operators: Ifpack2, textbook Chebyshev, and custom CG.
@@ -476,7 +477,7 @@ TEUCHOS_UNIT_TEST(Ifpack2Chebyshev, Convergence)
   CG<ST, MV, crs_matrix_type> cg (A);
 
   // Residual 2-norms for comparison.
-  MT maxResNormIfpack2, maxResNormTextbook, maxResNormCg;
+  MT maxResNormIfpack2, maxResNormTextbook, maxResNormFourthKind, maxResNormCg;
 
   ////////////////////////////////////////////////////////////////////
   // Test 1: set lambdaMax exactly, use default values of eigRatio and
@@ -496,6 +497,7 @@ TEUCHOS_UNIT_TEST(Ifpack2Chebyshev, Convergence)
   // Run our custom version of Chebyshev.
   x.putScalar (zero); // Reset the initial guess(es).
   params.set ("chebyshev: textbook algorithm", true);
+  params.set ("chebyshev: fourth kind algorithm", false);
   myCheby.setParameters (params);
   myCheby.compute ();
   (void) myCheby.apply (b, x);
@@ -503,6 +505,18 @@ TEUCHOS_UNIT_TEST(Ifpack2Chebyshev, Convergence)
   A->apply (x, r, Teuchos::NO_TRANS, -one, one);
   r.norm2 (norms ());
   maxResNormTextbook = *std::max_element (norms.begin (), norms.end ());
+
+  // Run our custom version of Chebyshev.
+  x.putScalar (zero); // Reset the initial guess(es).
+  params.set ("chebyshev: textbook algorithm", false);
+  params.set ("chebyshev: fourth kind algorithm", true);
+  myCheby.setParameters (params);
+  myCheby.compute ();
+  (void) myCheby.apply (b, x);
+  r = b;
+  A->apply (x, r, Teuchos::NO_TRANS, -one, one);
+  r.norm2 (norms ());
+  maxResNormFourthKind = *std::max_element (norms.begin (), norms.end ());
 
   // Run CG, just to compare.
   x.putScalar (zero); // Reset the initial guess(es).
@@ -513,8 +527,10 @@ TEUCHOS_UNIT_TEST(Ifpack2Chebyshev, Convergence)
       << ", default lambdaMin and eigRatio:" << endl
       << "- Ifpack2::Chebyshev:         " << maxResNormIfpack2 / maxInitResNorm << endl
       << "- Textbook Chebyshev:         " << maxResNormTextbook / maxInitResNorm << endl
+      << "- Fourth   Chebyshev:         " << maxResNormFourthKind / maxInitResNorm << endl
       << "- CG:                         " << maxResNormCg / maxInitResNorm << endl;
 
+#if 0
   ////////////////////////////////////////////////////////////////////
   // Test 2: set lambdaMax and lambdaMin exactly, and set eigRatio =
   // lambdaMax / lambdaMin.
@@ -538,6 +554,7 @@ TEUCHOS_UNIT_TEST(Ifpack2Chebyshev, Convergence)
   // Run our custom version of Chebyshev.
   x.putScalar (zero); // Reset the initial guess(es).
   params.set ("chebyshev: textbook algorithm", true);
+  params.set ("chebyshev: fourth kind algorithm", true);
   myCheby.setParameters (params);
   myCheby.compute ();
   (void) myCheby.apply (b, x);
@@ -559,6 +576,8 @@ TEUCHOS_UNIT_TEST(Ifpack2Chebyshev, Convergence)
 
   // Reset parameters.
   params.set ("chebyshev: textbook algorithm", false);
+  params.set ("chebyshev: fourth kind algorithm", false);
+
   // ParameterList is NOT a delta.  That is, if we remove these
   // parameters from the list, setParameters() will use default
   // values, rather than letting the current settings remain.
@@ -590,6 +609,7 @@ TEUCHOS_UNIT_TEST(Ifpack2Chebyshev, Convergence)
   // Run our custom version of Chebyshev.
   x.putScalar (zero); // Reset the initial guess(es).
   params.set ("chebyshev: textbook algorithm", true);
+  params.set ("chebyshev: fourth kind algorithm", true);
   myCheby.setParameters (params);
   myCheby.compute ();
   (void) myCheby.apply (b, x);
@@ -611,6 +631,7 @@ TEUCHOS_UNIT_TEST(Ifpack2Chebyshev, Convergence)
 
   // Reset parameters.
   params.set ("chebyshev: textbook algorithm", false);
+  params.set ("chebyshev: fourth kind algorithm", false);
 
   ////////////////////////////////////////////////////////////////////
   // Test 4: set lambdaMax exactly, and set eigRatio = 30 (Ifpack's
@@ -658,6 +679,7 @@ TEUCHOS_UNIT_TEST(Ifpack2Chebyshev, Convergence)
   params.set ("chebyshev: textbook algorithm", false);
   params.remove ("chebyshev: ratio eigenvalue", false);
   eigRatio = lambdaMax / lambdaMin;
+#endif
 
   ////////////////////////////////////////////////////////////////////
   // Test 5: Clear lambdaMax, lambdaMin, and eigRatio.  Let the
@@ -681,6 +703,7 @@ TEUCHOS_UNIT_TEST(Ifpack2Chebyshev, Convergence)
   // Run our custom version of Chebyshev.
   x.putScalar (zero); // Reset the initial guess(es).
   params.set ("chebyshev: textbook algorithm", true);
+  params.set ("chebyshev: fourth kind algorithm", false);
   myCheby.setParameters (params);
   myCheby.compute ();
   (void) myCheby.apply (b, x);
@@ -688,6 +711,18 @@ TEUCHOS_UNIT_TEST(Ifpack2Chebyshev, Convergence)
   A->apply (x, r, Teuchos::NO_TRANS, -one, one);
   r.norm2 (norms ());
   maxResNormTextbook = *std::max_element (norms.begin (), norms.end ());
+
+  // Run our fourth kind Chebyshev.
+  x.putScalar (zero); // Reset the initial guess(es).
+  params.set ("chebyshev: textbook algorithm", false);
+  params.set ("chebyshev: fourth kind algorithm", true);
+  myCheby.setParameters (params);
+  myCheby.compute ();
+  (void) myCheby.apply (b, x);
+  r = b;
+  A->apply (x, r, Teuchos::NO_TRANS, -one, one);
+  r.norm2 (norms ());
+  maxResNormFourthKind = *std::max_element (norms.begin (), norms.end ());
 
   // Run CG, just to compare.
   x.putScalar (zero); // Reset the initial guess(es).
@@ -698,12 +733,14 @@ TEUCHOS_UNIT_TEST(Ifpack2Chebyshev, Convergence)
     "with numEigIters = " << numEigIters << ":" << endl
       << "- Ifpack2::Chebyshev:         " << maxResNormIfpack2 / maxInitResNorm << endl
       << "- Textbook Chebyshev:         " << maxResNormTextbook / maxInitResNorm << endl
+      << "- Fourth   Chebyshev:         " << maxResNormFourthKind / maxInitResNorm << endl
       << "- CG:                         " << maxResNormCg / maxInitResNorm << endl;
 
   // Print the computed max and min eigenvalues, and other details.
   os2 << endl;
   myCheby.print (os2);
 
+#if 0
   // Reset parameters.
   params.set ("chebyshev: textbook algorithm", false);
 
@@ -775,6 +812,7 @@ TEUCHOS_UNIT_TEST(Ifpack2Chebyshev, Convergence)
   // Print the computed max and min eigenvalues, and other details.
   os2 << endl;
   myCheby.print (os2);
+  #endif
 }
 
 
