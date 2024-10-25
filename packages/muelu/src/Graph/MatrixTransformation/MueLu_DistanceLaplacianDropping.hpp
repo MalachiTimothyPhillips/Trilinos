@@ -132,14 +132,19 @@ class ScalarMaterialDistanceFunctor {
     // where
     // S = 1/material(row) * Identity
     magnitudeType d = magATS::zero();
+    magnitudeType d_row = magATS::zero();
+    magnitudeType d_col = magATS::zero();
     magnitudeType s;
 
     for (size_t j = 0; j < coords.extent(1); ++j) {
       s = coords(row, j) - ghostedCoords(col, j);
       d += s * s;
     }
-    d /= implATS::magnitude(ghostedMaterial(col, 0));
-    return d;
+
+    d_row = d / implATS::magnitude(ghostedMaterial(row, 0));
+    d_col = d / implATS::magnitude(ghostedMaterial(col, 0));
+
+    return Kokkos::max(d_row, d_col);
   }
 };
 

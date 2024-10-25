@@ -62,10 +62,16 @@ void MultiVectorTransferFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Buil
   transferOp->apply(*onesVector, *rowSumVector);
   transferOp->apply(*fineVector, *coarseVector);
 
+  // Do constant row sum normalization
+  RCP<Vector> rowSumReciprocalVector = VectorFactory::Build(transferOp->getRangeMap());
+  rowSumReciprocalVector->reciprocal(*rowSumVector);
+  RCP<MultiVector> coarseVectorNormalized = MultiVectorFactory::Build(transferOp->getRangeMap(), fineVector->getNumVectors());
+  coarseVectorNormalized->elementWiseMultiply(1.0, *rowSumReciprocalVector, *coarseVector, 0.0);
+
   if (vectorName == "Coordinates")
     TEUCHOS_TEST_FOR_EXCEPTION(true, Exceptions::RuntimeError, "Use CoordinatesTransferFactory to transfer coordinates instead of MultiVectorTransferFactory.");
 
-  Set<RCP<MultiVector> >(coarseLevel, vectorName, coarseVector);
+  Set<RCP<MultiVector> >(coarseLevel, vectorName, coarseVectorNormalized);
 
 }  // Build
 
