@@ -18,6 +18,7 @@ sys.dont_write_bytecode = True
 from .sysinfo import SysInfo
 from LoadEnv.load_env import LoadEnv
 import setenvironment
+from .sysinfo import gpu_utils
 
 
 
@@ -74,6 +75,7 @@ class TrilinosPRConfigurationBase(object):
         self._concurrency_build    = None
         self._concurrency_test     = None
         self._debug_level          = 1
+        self._arg_extra_configure_args = None
 
 
     # --------------------
@@ -93,7 +95,17 @@ class TrilinosPRConfigurationBase(object):
         Returns:
             self.args.extra_configure_args
         """
-        return self.args.extra_configure_args
+        if not self._arg_extra_configure_args:
+            if gpu_utils.has_nvidia_gpus():
+                self.message("-- REMARK: I see that I am running on a machine that has NVidia GPUs; I will feed TriBITS some data enabling GPU resource management")
+                slots_per_gpu = 2
+                gpu_indices = gpu_utils.list_nvidia_gpus()
+                self.message(f"-- REMARK: Using {slots_per_gpu} slots per GPU")
+                self.message(f"-- REMARK: Using GPUs {gpu_indices}")
+                self._arg_extra_configure_args = f"-DTrilinos_AUTOGENERATE_TEST_RESOURCE_FILE:BOOL=ON;-DTrilinos_CUDA_NUM_GPUS:STRING={len(gpu_indices)};-DTrilinos_CUDA_SLOTS_PER_GPU:STRING={slots_per_gpu}" + (";" + self.args.extra_configure_args if self.args.extra_configure_args else "")
+            else:
+                self._arg_extra_configure_args = self.args.extra_configure_args
+        return self._arg_extra_configure_args
 
     @property
     def arg_ctest_driver(self):
@@ -480,10 +492,12 @@ class TrilinosPRConfigurationBase(object):
         """
         Generate the build name string to report back to CDash.
 
-        PR-<PR Number>-test-<Jenkins Job Name>-<Job Number">
+        PR-<PR Number>-test-<Jenkins Job Name>-<Job Number>
         """
         if "Pull Request" in self.arg_pullrequest_cdash_track:
-            output = "PR-{}-test-{}-{}".format(self.arg_pullrequest_number, self.arg_pr_genconfig_job_name, self.arg_jenkins_job_number)
+            output = f"PR-{self.arg_pullrequest_number}-test-{self.arg_pr_genconfig_job_name}"
+            if not self.arg_jenkins_job_number or "UNKNOWN" not in str(self.arg_jenkins_job_number):
+                output = f"{output}-{self.arg_jenkins_job_number}"
         elif self.arg_dashboard_build_name != "__UNKNOWN__":
             output = self.arg_dashboard_build_name
         else:

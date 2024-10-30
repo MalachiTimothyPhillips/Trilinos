@@ -111,15 +111,12 @@ enum class FunctionType {
   WEIBULL_PDF,
   GAMMA_PDF,
 
-  RAND,
-  SRAND,
-  RANDOM,
   TS_RANDOM,
   TS_NORMAL,
-  TIME,
 
   UNDEFINED
 };
+
 
 KOKKOS_INLINE_FUNCTION
 double cycloidal_ramp(double t, double t1, double t2)

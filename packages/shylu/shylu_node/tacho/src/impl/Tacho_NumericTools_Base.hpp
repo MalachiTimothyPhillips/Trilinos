@@ -46,9 +46,9 @@ public:
   using host_space = typename host_device_type::execution_space;
   using host_memory_space = typename host_device_type::memory_space;
 
-  using ordinal_type_array_host = typename ordinal_type_array::HostMirror;
-  using size_type_array_host = typename size_type_array::HostMirror;
-  using supernode_type_array_host = typename supernode_type_array::HostMirror;
+  using ordinal_type_array_host = Kokkos::View<ordinal_type *, host_device_type>;
+  using size_type_array_host = Kokkos::View<size_type *, host_device_type>;
+  using supernode_type_array_host = Kokkos::View<typename supernode_info_type::supernode_type *, host_device_type>;
 
 protected:
   ///
@@ -125,9 +125,10 @@ protected:
   virtual void print_stat_factor() {
     const double kilo(1024);
     printf("  Time\n");
+    printf("             time for extra tasks (allocation):               %10.6f s\n", stat.t_extra);
     printf("             time for copying A into supernodes:              %10.6f s\n", stat.t_copy);
     printf("             time for numeric factorization:                  %10.6f s\n", stat.t_factor);
-    printf("             total time spent:                                %10.6f s\n", (stat.t_copy + stat.t_factor));
+    printf("             total time spent:                                %10.6f s\n", (stat.t_extra + stat.t_copy + stat.t_factor));
     printf("\n");
     printf("  Memory\n");
     printf("             memory used in factorization:                    %10.3f MB\n", stat.m_used / kilo / kilo);
