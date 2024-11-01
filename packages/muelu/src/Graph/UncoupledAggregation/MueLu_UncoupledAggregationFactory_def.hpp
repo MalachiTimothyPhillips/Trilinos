@@ -75,7 +75,6 @@ RCP<const ParameterList> UncoupledAggregationFactory<LocalOrdinal, GlobalOrdinal
   SET_VALID_ENTRY("aggregation: use interface aggregation");
   SET_VALID_ENTRY("aggregation: error on nodes with no on-rank neighbors");
   SET_VALID_ENTRY("aggregation: phase3 avoid singletons");
-  SET_VALID_ENTRY("aggregation: compute aggregate qualities");
   SET_VALID_ENTRY("aggregation: phase 1 algorithm");
 #undef SET_VALID_ENTRY
 
@@ -130,10 +129,6 @@ void UncoupledAggregationFactory<LocalOrdinal, GlobalOrdinal, Node>::DeclareInpu
     } else {
       Input(currentLevel, "nodeOnInterface");
     }
-  }
-
-  if (pL.get<bool>("aggregation: compute aggregate qualities")) {
-    Input(currentLevel, "AggregateQualities");
   }
 }
 
@@ -375,10 +370,6 @@ void UncoupledAggregationFactory<LocalOrdinal, GlobalOrdinal, Node>::Build(Level
   aggregates->ComputeAggregateSizes(true /*forceRecompute*/);
 
   Set(currentLevel, "Aggregates", aggregates);
-
-  if (pL.get<bool>("aggregation: compute aggregate qualities")) {
-    RCP<Xpetra::MultiVector<DefaultScalar, LO, GO, Node>> aggQualities = Get<RCP<Xpetra::MultiVector<DefaultScalar, LO, GO, Node>>>(currentLevel, "AggregateQualities");
-  }
 }
 
 template <class LocalOrdinal, class GlobalOrdinal, class Node>
