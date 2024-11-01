@@ -1420,7 +1420,7 @@ void ParameterListInterpreter<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
 
     } else {
       RCP<Factory> material = rcp(new MultiVectorTransferFactory("Material"));
-      material->SetFactory("R", manager.GetFactory("R"));
+      material->SetFactory("P", manager.GetFactory("Ptent"));
       manager.SetFactory("Material", material);
 
       auto RAP = rcp_const_cast<RAPFactory>(rcp_dynamic_cast<const RAPFactory>(manager.GetFactory("A")));

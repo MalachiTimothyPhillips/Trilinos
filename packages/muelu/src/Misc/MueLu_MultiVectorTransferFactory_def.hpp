@@ -24,7 +24,7 @@ RCP<const ParameterList> MultiVectorTransferFactory<Scalar, LocalOrdinal, Global
 
   validParamList->set<std::string>("Vector name", "undefined", "Name of the vector that will be transferred on the coarse grid (level key)");  // TODO: how to set a validator without default value?
   validParamList->set<RCP<const FactoryBase> >("Vector factory", Teuchos::null, "Factory of the vector");
-  validParamList->set<RCP<const FactoryBase> >("R", Teuchos::null, "Factory of the transfer operator (restriction)");
+  validParamList->set<RCP<const FactoryBase> >("P", Teuchos::null, "Tentative prolongator factory");
 
   return validParamList;
 }
@@ -40,7 +40,7 @@ void MultiVectorTransferFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Decl
   std::string vectorName  = pL.get<std::string>("Vector name");
 
   fineLevel.DeclareInput(vectorName, GetFactory("Vector factory").get(), this);
-  Input(coarseLevel, "R");
+  Input(coarseLevel, "P");
 }
 
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
@@ -51,21 +51,21 @@ void MultiVectorTransferFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Buil
   std::string vectorName  = pL.get<std::string>("Vector name");
 
   RCP<MultiVector> fineVector = fineLevel.Get<RCP<MultiVector> >(vectorName, GetFactory("Vector factory").get());
-  RCP<Matrix> transferOp      = Get<RCP<Matrix> >(coarseLevel, "R");
+  RCP<Matrix> transferOp      = Get<RCP<Matrix> >(coarseLevel, "P");
 
-  RCP<MultiVector> coarseVector = MultiVectorFactory::Build(transferOp->getRangeMap(), fineVector->getNumVectors());
+  RCP<MultiVector> coarseVector = MultiVectorFactory::Build(transferOp->getDomainMap(), fineVector->getNumVectors());
   GetOStream(Runtime0) << "Transferring multivector \"" << vectorName << "\"" << std::endl;
 
-  RCP<MultiVector> onesVector = MultiVectorFactory::Build(transferOp->getDomainMap(), 1);
+  RCP<MultiVector> onesVector = MultiVectorFactory::Build(transferOp->getRangeMap(), 1);
   onesVector->putScalar(Teuchos::ScalarTraits<Scalar>::one());
-  RCP<MultiVector> rowSumVector = MultiVectorFactory::Build(transferOp->getRangeMap(), 1);
-  transferOp->apply(*onesVector, *rowSumVector);
-  transferOp->apply(*fineVector, *coarseVector);
+  RCP<MultiVector> rowSumVector = MultiVectorFactory::Build(transferOp->getDomainMap(), 1);
+  transferOp->apply(*onesVector, *rowSumVector, Teuchos::TRANS);
+  transferOp->apply(*fineVector, *coarseVector, Teuchos::TRANS);
 
   // Do constant row sum normalization
-  RCP<Vector> rowSumReciprocalVector = VectorFactory::Build(transferOp->getRangeMap());
+  RCP<Vector> rowSumReciprocalVector = VectorFactory::Build(transferOp->getDomainMap());
   rowSumReciprocalVector->reciprocal(*rowSumVector);
-  RCP<MultiVector> coarseVectorNormalized = MultiVectorFactory::Build(transferOp->getRangeMap(), fineVector->getNumVectors());
+  RCP<MultiVector> coarseVectorNormalized = MultiVectorFactory::Build(transferOp->getDomainMap(), fineVector->getNumVectors());
   coarseVectorNormalized->elementWiseMultiply(1.0, *rowSumReciprocalVector, *coarseVector, 0.0);
 
   if (vectorName == "Coordinates")
