@@ -1326,6 +1326,8 @@ void ParameterListInterpreter<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     aggQualityFact->SetFactory("Aggregates", manager.GetFactory("Aggregates"));
     aggQualityFact->SetFactory("CoarseMap", manager.GetFactory("CoarseMap"));
 
+    manager.SetFactory("AggregateQualities", aggQualityFact);
+
     if (!RAP.is_null())
       RAP->AddTransferFactory(aggQualityFact);
     else
@@ -1344,6 +1346,8 @@ void ParameterListInterpreter<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     MUELU_TEST_AND_SET_PARAM_2LIST(paramList, defaultList, "aggregation: output file: build colormap", bool, aggExportParams);
     aggExport->SetParameterList(aggExportParams);
     aggExport->SetFactory("DofsPerNode", manager.GetFactory("DofsPerNode"));
+    aggExport->SetFactory("Aggregates", manager.GetFactory("Aggregates"));
+    aggExport->SetFactory("AggregateQualities", manager.GetFactory("AggregateQualities"));
 
     if (!RAP.is_null())
       RAP->AddTransferFactory(aggExport);

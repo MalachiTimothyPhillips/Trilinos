@@ -89,7 +89,7 @@ void AggregateQualityEstimateFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>:
     Set(fineLevel, "AggregateSizes", aggregate_sizes);
     OutputAggSizes(fineLevel, aggregate_sizes);
   }
-  Set(fineLevel, "AggregateQualities", aggregate_qualities);
+  Set(coarseLevel, "AggregateQualities", aggregate_qualities);
 }
 
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>

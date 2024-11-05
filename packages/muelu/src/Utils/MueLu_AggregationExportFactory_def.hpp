@@ -66,6 +66,8 @@ RCP<const ParameterList> AggregationExportFactory<Scalar, LocalOrdinal, GlobalOr
   validParamList->set<RCP<const FactoryBase> >("Aggregates", Teuchos::null, "Factory for Aggregates.");
   validParamList->set<RCP<const FactoryBase> >("UnAmalgamationInfo", Teuchos::null, "Factory for UnAmalgamationInfo.");
   validParamList->set<RCP<const FactoryBase> >("DofsPerNode", Teuchos::null, "Factory for DofsPerNode.");
+  validParamList->set<RCP<const FactoryBase> >("AggregateQualities", Teuchos::null, "Factory for AggregateQualities.");
+  //validParamList->set<RCP<const FactoryBase> >("Material", Teuchos::null, "Factory for Material.");
   // CMS/BMK: Old style factory-only options.  Deprecate me.
   validParamList->set<std::string>("Output filename", output_def, output_msg);
   validParamList->set<int>("Output file: time step", 0, "time step variable for output file name");
@@ -99,6 +101,10 @@ void AggregationExportFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Declar
       Input(coarseLevel, "A");
       Input(coarseLevel, "Graph");
     }
+
+    Input(coarseLevel, "AggregateQualities");
+    //Input(fineLevel, "Material");
+
   }
 }
 
@@ -109,6 +115,10 @@ void AggregationExportFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Build(
   const ParameterList& pL = GetParameterList();
   FactoryMonitor m(*this, "AggregationExportFactory", coarseLevel);
   Teuchos::RCP<Aggregates> aggregates          = Get<Teuchos::RCP<Aggregates> >(fineLevel, "Aggregates");
+
+  qualities_ = Get<Teuchos::RCP<MultiVector> >(coarseLevel, "AggregateQualities");
+  //materials_ = Get<Teuchos::RCP<MultiVector> >(coarseLevel, "Material");
+
   Teuchos::RCP<const Teuchos::Comm<int> > comm = aggregates->GetMap()->getComm();
   int numProcs                                 = comm->getSize();
   int myRank                                   = comm->getRank();
@@ -424,7 +434,7 @@ void AggregationExportFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::doGrap
   fout << "  <UnstructuredGrid>" << endl;
   fout << "    <Piece NumberOfPoints=\"" << unique1.size() + unique2.size() << "\" NumberOfCells=\"" << vert1.size() + vert2.size() << "\">" << endl;
   fout << "      <PointData Scalars=\"Node Aggregate Processor\">" << endl;
-  fout << "        <DataArray type=\"Int32\" Name=\"Node\" format=\"ascii\">" << endl;  // node and aggregate will be set to CONTRAST_1|2, but processor will have its actual value
+  fout << "        <DataArray type=\"Int32\" Name=\"Node\" format=\"ascii\">" << endl;  // node and aggregate will be set to CONTRAST_1|2, but processor will have its actual value^
   string indent = "          ";
   fout << indent;
   for (size_t i = 0; i < unique1.size(); i++) {
@@ -571,6 +581,10 @@ void AggregationExportFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::writeF
   if (dims_ == 3)
     zCoords = coords_->getData(2);
 
+  Teuchos::ArrayRCP<const typename Teuchos::ScalarTraits<Scalar>::coordinateType> qualities = qualities_->getData(0);
+
+  //Teuchos::ArrayRCP<const typename Teuchos::ScalarTraits<Scalar>::coordinateType> materials = materials_->getData(0);
+
   vector<int> uniqueFine = this->makeUnique(vertices);
   string indent          = "      ";
   fout << "<!--" << styleName << " Aggregates Visualization-->" << endl;
@@ -615,6 +629,26 @@ void AggregationExportFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::writeF
            << indent;
   }
   fout << endl;
+  fout << "        </DataArray>" << endl;
+  fout << "        <DataArray type=\"Float64\" Name=\"Quality\" format=\"ascii\">" << endl;
+  fout << indent;
+  for (size_t i = 0; i < uniqueFine.size(); i++) {
+    fout << qualities[vertex2AggId_[uniqueFine[i]]] << " ";
+    if (i % 10 == 9)
+      fout << endl
+           << indent;
+  }
+  fout << endl;
+  //fout << "        </DataArray>" << endl;
+  //fout << "        <DataArray type=\"Float64\" Name=\"Material\" format=\"ascii\">" << endl;
+  //fout << indent;
+  //for (size_t i = 0; i < uniqueFine.size(); i++) {
+  //  fout << materials[vertex2AggId_[uniqueFine[i]]] << " ";
+  //  if (i % 10 == 9)
+  //    fout << endl
+  //         << indent;
+  //}
+  //fout << endl;
   fout << "        </DataArray>" << endl;
   fout << "      </PointData>" << endl;
   fout << "      <Points>" << endl;
