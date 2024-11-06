@@ -113,7 +113,7 @@ class ScalarMaterialDistanceFunctor {
       coords        = coordsMV->getDeviceLocalView(Xpetra::Access::ReadOnly);
       ghostedCoords = ghostedCoordsMV->getDeviceLocalView(Xpetra::Access::ReadOnly);
 
-      ghostedMaterialMV = Xpetra::MultiVectorFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Build(importer->getTargetMap(), coordsMV->getNumVectors());
+      ghostedMaterialMV = Xpetra::MultiVectorFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Build(importer->getTargetMap(), materialMV->getNumVectors());
       ghostedMaterialMV->doImport(*materialMV, *importer, Xpetra::INSERT);
       material        = materialMV->getDeviceLocalView(Xpetra::Access::ReadOnly);
       ghostedMaterial = ghostedMaterialMV->getDeviceLocalView(Xpetra::Access::ReadOnly);
