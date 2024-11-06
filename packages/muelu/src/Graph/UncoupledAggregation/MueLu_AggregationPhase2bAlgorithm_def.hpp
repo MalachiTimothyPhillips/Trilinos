@@ -39,12 +39,12 @@ void AggregationPhase2bAlgorithm<LocalOrdinal, GlobalOrdinal, Node>::BuildAggreg
 
   LO numLocalAggregates = aggregates.GetNumAggregates();
 
-  const int defaultConnectWeight = 100;
-  const int penaltyConnectWeight = 10;
+  const LO defaultConnectWeight = 100;
+  const LO penaltyConnectWeight = 10;
 
-  std::vector<int> aggWeight(numLocalAggregates, 0);
-  std::vector<int> connectWeight(numRows, defaultConnectWeight);
-  std::vector<int> aggPenalties(numRows, 0);
+  std::vector<LO> aggWeight(numLocalAggregates, 0);
+  std::vector<LO> connectWeight(numRows, defaultConnectWeight);
+  std::vector<LO> aggPenalties(numRows, 0);
 
   // We do this cycle twice.
   // I don't know why, but ML does it too
@@ -150,7 +150,6 @@ void AggregationPhase2bAlgorithm<LO, GO, Node>::
   const LO defaultConnectWeight = 100;
   const LO penaltyConnectWeight = 10;
 
-  Kokkos::View<LO*, device_type> aggWeight(Kokkos::ViewAllocateWithoutInitializing("aggWeight"), numLocalAggregates);  // This gets re-initialized at the start of each "color" loop
   Kokkos::View<LO*, device_type> connectWeight(Kokkos::ViewAllocateWithoutInitializing("connectWeight"), numRows);
   Kokkos::View<LO*, device_type> aggPenalties("aggPenalties", numLocalAggregates);  // This gets initialized to zero here
 
@@ -170,8 +169,6 @@ void AggregationPhase2bAlgorithm<LO, GO, Node>::
   }
   for (int iter = 0; iter < maxIters; ++iter) {
     for (LO color = 1; color <= numColors; ++color) {
-      Kokkos::deep_copy(aggWeight, 0);
-
       // the reduce counts how many nodes are aggregated by this phase,
       // which will then be subtracted from numNonAggregatedNodes
       LO numAggregated = 0;
@@ -182,29 +179,27 @@ void AggregationPhase2bAlgorithm<LO, GO, Node>::
             if (aggStat(i) != READY || colors(i) != color)
               return;
 
-            auto neighOfINode = lclLWGraph.getNeighborVertices(i);
-            for (int j = 0; j < neighOfINode.length; j++) {
-              LO neigh = neighOfINode(j);
-
-              // We don't check (neigh != i), as it is covered by checking
-              // (aggStat[neigh] == AGGREGATED)
-              if (lclLWGraph.isLocalNeighborVertex(neigh) &&
-                  aggStat(neigh) == AGGREGATED)
-                Kokkos::atomic_add(&aggWeight(vertex2AggId(neigh, 0)),
-                                   connectWeight(neigh));
-            }
-
             int bestScore   = -100000;
             int bestAggId   = -1;
             int bestConnect = -1;
+
+            auto neighOfINode = lclLWGraph.getNeighborVertices(i);
 
             for (int j = 0; j < neighOfINode.length; j++) {
               LO neigh = neighOfINode(j);
 
               if (lclLWGraph.isLocalNeighborVertex(neigh) &&
                   aggStat(neigh) == AGGREGATED) {
-                auto aggId = vertex2AggId(neigh, 0);
-                int score  = aggWeight(aggId) - aggPenalties(aggId);
+                auto aggId   = vertex2AggId(neigh, 0);
+                LO aggWeight = 0;
+                for (int k = 0; k < neighOfINode.length; k++) {
+                  LO neigh2 = neighOfINode(k);
+                  if (lclLWGraph.isLocalNeighborVertex(neigh2) &&
+                      (aggStat(neigh2) == AGGREGATED) &&
+                      (vertex2AggId(neigh2, 0) == aggId))
+                    aggWeight += connectWeight(neigh2);
+                }
+                int score = aggWeight - aggPenalties(aggId);
 
                 if (score > bestScore) {
                   bestAggId   = aggId;
@@ -247,21 +242,19 @@ void AggregationPhase2bAlgorithm<LO, GO, Node>::
   const LO numRows = graph.GetNodeNumVertices();
   const int myRank = graph.GetComm()->getRank();
 
-  auto vertex2AggId     = aggregates.GetVertex2AggId()->getDeviceLocalView(Xpetra::Access::ReadWrite);
-  auto procWinner       = aggregates.GetProcWinner()->getDeviceLocalView(Xpetra::Access::ReadWrite);
-  auto colors           = aggregates.GetGraphColors();
-  const LO numColors    = aggregates.GetGraphNumColors();
-  LO numLocalAggregates = aggregates.GetNumAggregates();
+  auto vertex2AggId           = aggregates.GetVertex2AggId()->getDeviceLocalView(Xpetra::Access::ReadWrite);
+  auto procWinner             = aggregates.GetProcWinner()->getDeviceLocalView(Xpetra::Access::ReadWrite);
+  auto colors                 = aggregates.GetGraphColors();
+  const LO numColors          = aggregates.GetGraphNumColors();
+  const LO numLocalAggregates = aggregates.GetNumAggregates();
 
   auto lclLWGraph = graph;
 
-  const int defaultConnectWeight = 100;
-  const int penaltyConnectWeight = 10;
+  const LO defaultConnectWeight = 100;
+  const LO penaltyConnectWeight = 10;
 
-  Kokkos::View<int*, device_type> connectWeight(Kokkos::ViewAllocateWithoutInitializing("connectWeight"), numRows);
-  Kokkos::View<int*, device_type> aggWeight(Kokkos::ViewAllocateWithoutInitializing("aggWeight"), numLocalAggregates);  // This gets re-initialized at the start of each "color" loop
-  Kokkos::View<int*, device_type> aggPenaltyUpdates("aggPenaltyUpdates", numLocalAggregates);
-  Kokkos::View<int*, device_type> aggPenalties("aggPenalties", numLocalAggregates);
+  Kokkos::View<LO*, device_type> connectWeight(Kokkos::ViewAllocateWithoutInitializing("connectWeight"), numRows);
+  Kokkos::View<LO*, device_type> aggPenalties("aggPenalties", numLocalAggregates);  // This gets initialized to zero here
 
   Kokkos::deep_copy(connectWeight, defaultConnectWeight);
 
@@ -277,29 +270,10 @@ void AggregationPhase2bAlgorithm<LO, GO, Node>::
     maxIters = 1;
   }
   for (int iter = 0; iter < maxIters; ++iter) {
-    for (LO color = 1; color <= numColors; color++) {
-      Kokkos::deep_copy(aggWeight, 0);
-
+    for (LO color = 1; color <= numColors; ++color) {
       // the reduce counts how many nodes are aggregated by this phase,
       // which will then be subtracted from numNonAggregatedNodes
       LO numAggregated = 0;
-      Kokkos::parallel_for(
-          "Aggregation Phase 2b: updating agg weights",
-          Kokkos::RangePolicy<execution_space>(0, numRows),
-          KOKKOS_LAMBDA(const LO i) {
-            if (aggStat(i) != READY || colors(i) != color)
-              return;
-            auto neighOfINode = lclLWGraph.getNeighborVertices(i);
-            for (int j = 0; j < neighOfINode.length; j++) {
-              LO neigh = neighOfINode(j);
-              // We don't check (neigh != i), as it is covered by checking
-              // (aggStat[neigh] == AGGREGATED)
-              if (lclLWGraph.isLocalNeighborVertex(neigh) &&
-                  aggStat(neigh) == AGGREGATED)
-                Kokkos::atomic_add(&aggWeight(vertex2AggId(neigh, 0)),
-                                   connectWeight(neigh));
-            }
-          });
 
       Kokkos::parallel_reduce(
           "Aggregation Phase 2b: aggregates expansion",
@@ -317,8 +291,17 @@ void AggregationPhase2bAlgorithm<LO, GO, Node>::
 
               if (lclLWGraph.isLocalNeighborVertex(neigh) &&
                   aggStat(neigh) == AGGREGATED) {
-                auto aggId = vertex2AggId(neigh, 0);
-                int score  = aggWeight(aggId) - aggPenalties(aggId);
+                auto aggId   = vertex2AggId(neigh, 0);
+                LO aggWeight = 0;
+                for (int k = 0; k < neighOfINode.length; k++) {
+                  LO neigh2 = neighOfINode(k);
+                  if (lclLWGraph.isLocalNeighborVertex(neigh2) &&
+                      (aggStat(neigh2) == AGGREGATED) &&
+                      (vertex2AggId(neigh2, 0) == aggId))
+                    aggWeight += connectWeight(neigh2);
+                }
+
+                int score = aggWeight - aggPenalties(aggId);
 
                 if (score > bestScore) {
                   bestAggId   = aggId;
@@ -336,23 +319,16 @@ void AggregationPhase2bAlgorithm<LO, GO, Node>::
               vertex2AggId(i, 0) = bestAggId;
               procWinner(i, 0)   = myRank;
 
-              Kokkos::atomic_add(&aggPenaltyUpdates(bestAggId), 1);
+              Kokkos::atomic_add(&aggPenalties(bestAggId), 1);
               connectWeight(i) = bestConnect - penaltyConnectWeight;
               tmpNumAggregated++;
             }
           },
           numAggregated);  // parallel_reduce
 
-      Kokkos::parallel_for(
-          "Aggregation Phase 2b: updating agg penalties",
-          Kokkos::RangePolicy<execution_space>(0, numLocalAggregates),
-          KOKKOS_LAMBDA(const LO agg) {
-            aggPenalties(agg) += aggPenaltyUpdates(agg);
-            aggPenaltyUpdates(agg) = 0;
-          });
       numNonAggregatedNodes -= numAggregated;
     }
-  }  // loop over k
+  }  // loop over maxIters
 }  // BuildAggregatesDeterministic
 
 }  // namespace MueLu
