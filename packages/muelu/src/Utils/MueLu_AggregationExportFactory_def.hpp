@@ -581,7 +581,7 @@ void AggregationExportFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::writeF
   if (dims_ == 3)
     zCoords = coords_->getData(2);
 
-  Teuchos::ArrayRCP<const typename Teuchos::ScalarTraits<Scalar>::coordinateType> qualities = qualities_->getData(0);
+  auto qualities = qualities_->getData(0);
 
   //Teuchos::ArrayRCP<const typename Teuchos::ScalarTraits<Scalar>::coordinateType> materials = materials_->getData(0);
 
