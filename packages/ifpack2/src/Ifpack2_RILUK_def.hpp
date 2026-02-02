@@ -1002,6 +1002,10 @@ void RILUK<MatrixType>::compute_kkspiluk() {
 
 template <class MatrixType>
 void RILUK<MatrixType>::compute_kkspiluk_stream() {
+
+  Teuchos::Time timer("RILUK::compute_kkspiluk_stream");
+  Teuchos::TimeMonitor timeMon(timer);
+
   std::vector<lno_row_view_t> L_rowmap_v(num_streams_);
   std::vector<lno_nonzero_view_t> L_entries_v(num_streams_);
   std::vector<scalar_nonzero_view_t> L_values_v(num_streams_);
@@ -1029,6 +1033,8 @@ void RILUK<MatrixType>::compute_kkspiluk_stream() {
   }
 
   if (hasStreamReordered_) {
+    Teuchos::Time reorderTimer("RILUK::compute_kkspiluk_stream::hasStreamReordered_ branch");
+    Teuchos::TimeMonitor reorderTimeMonitor(reorderTimer);
     // NOTE: For now, only do the value copying if RCM reordering is enabled in streams.
     //       Otherwise, value copying was taken care prior to entering this function.
     //       TODO: revisit this later.
@@ -1067,18 +1073,26 @@ void RILUK<MatrixType>::compute_kkspiluk_stream() {
     }
   }
 
-  KokkosSparse::Experimental::spiluk_numeric_streams(exec_space_instances_, KernelHandle_rawptr_v_, LevelOfFill_,
-                                                     A_local_diagblks_rowmap_v_, A_local_diagblks_entries_v_, A_local_diagblks_values_v_,
-                                                     L_rowmap_v, L_entries_v, L_values_v,
-                                                     U_rowmap_v, U_entries_v, U_values_v);
-
-  for (int i = 0; i < num_streams_; i++) {
-    L_v_[i]->fillComplete();
-    U_v_[i]->fillComplete();
+  {
+    Teuchos::Time numericStreamTimer("RILUK::compute_kkspiluk_stream::spiluk_numeric_streams");
+    Teuchos::TimeMonitor numericStreamTimeMonitor(numericStreamTimer);
+    KokkosSparse::Experimental::spiluk_numeric_streams(exec_space_instances_, KernelHandle_rawptr_v_, LevelOfFill_,
+                                                       A_local_diagblks_rowmap_v_, A_local_diagblks_entries_v_, A_local_diagblks_values_v_,
+                                                       L_rowmap_v, L_entries_v, L_values_v,
+                                                       U_rowmap_v, U_entries_v, U_values_v);
   }
 
-  L_solver_->compute();
-  U_solver_->compute();
+  {
+    Teuchos::Time LUTimer("RILUK::compute_kkspiluk_stream::L/U fill complete + compute");
+    Teuchos::TimeMonitor LUTimeMonitor(LUTimer);
+    for (int i = 0; i < num_streams_; i++) {
+      L_v_[i]->fillComplete();
+      U_v_[i]->fillComplete();
+    }
+
+    L_solver_->compute();
+    U_solver_->compute();
+  }
 }
 
 template <class MatrixType>
@@ -1135,18 +1149,22 @@ void RILUK<MatrixType>::compute() {
     if (!isKokkosKernelsStream_) {
       compute_kkspiluk();
     } else {
-      // If streams are on, we potentially have to refresh A_local_diagblks_values_v_
-      auto lclMtx = A_local_crs_->getLocalMatrixDevice();
-      if (!hasStreamsWithRCB_) {
-        KokkosSparse::Impl::kk_extract_diagonal_blocks_crsmatrix_sequential(lclMtx, A_local_diagblks_v_, hasStreamReordered_);
-      } else {
-        auto A_coordinates_lcl = A_coordinates_->getLocalViewDevice(Tpetra::Access::ReadOnly);
-        Kokkos::deep_copy(coors_rcb_, A_coordinates_lcl);
-        KokkosSparse::Impl::kk_extract_diagonal_blocks_crsmatrix_with_rcb_sequential(lclMtx, coors_rcb_,
-                                                                                     A_local_diagblks_v_, perm_rcb_);
-      }
-      for (int i = 0; i < num_streams_; i++) {
-        A_local_diagblks_values_v_[i] = A_local_diagblks_v_[i].values;
+      {
+        Teuchos::Time localDiagBlkTimer("RILUK::compute::A_local_diagblks_values_v_");
+        Teuchos::TimeMonitor localDiagBlkTimeMonitor(localDiagBlkTimer);
+        // If streams are on, we potentially have to refresh A_local_diagblks_values_v_
+        auto lclMtx = A_local_crs_->getLocalMatrixDevice();
+        if (!hasStreamsWithRCB_) {
+          KokkosSparse::Impl::kk_extract_diagonal_blocks_crsmatrix_sequential(lclMtx, A_local_diagblks_v_, hasStreamReordered_);
+        } else {
+          auto A_coordinates_lcl = A_coordinates_->getLocalViewDevice(Tpetra::Access::ReadOnly);
+          Kokkos::deep_copy(coors_rcb_, A_coordinates_lcl);
+          KokkosSparse::Impl::kk_extract_diagonal_blocks_crsmatrix_with_rcb_sequential(lclMtx, coors_rcb_,
+                                                                                       A_local_diagblks_v_, perm_rcb_);
+        }
+        for (int i = 0; i < num_streams_; i++) {
+          A_local_diagblks_values_v_[i] = A_local_diagblks_v_[i].values;
+        }
       }
 
       compute_kkspiluk_stream();
