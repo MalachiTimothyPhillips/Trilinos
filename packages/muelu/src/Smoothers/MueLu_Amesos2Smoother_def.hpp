@@ -166,6 +166,11 @@ void Amesos2Smoother<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Setup(Level& cu
     this->GetOStream(Warnings0) << "MueLu::Amesos2Smoother::Setup(): Setup() has already been called" << std::endl;
 
   RCP<Matrix> A = Factory::Get<RCP<Matrix> >(currentLevel, "A");
+  auto A_block = rcp_dynamic_cast<BlockedCrsMatrix>(A);
+  if(A_block)
+  {
+    A = A_block->Merge();
+  }
 
   // Do a quick check if we need to modify the matrix
   RCP<const Map> rowMap = A->getRowMap();

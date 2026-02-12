@@ -231,7 +231,7 @@ bool DefaultBlockedLinearOp<Scalar>::blockExists(
 {
   assertBlockFillIsActive(false);
   assertBlockRowCol(i,j);
-  return true;
+  return !is_null(Ops_[numRowBlocks_*j+i]);
 }
 
 

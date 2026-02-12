@@ -122,6 +122,13 @@ RCP<Xpetra::Matrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>> MatrixMatrix<Scal
                                                                                                                                  bool doOptimizeStorage,
                                                                                                                                  const std::string& label,
                                                                                                                                  const RCP<ParameterList>& params) {
+  auto A_blk = rcp_dynamic_cast<const BlockedCrsMatrix>(rcpFromRef(A));
+  auto B_blk = rcp_dynamic_cast<const BlockedCrsMatrix>(rcpFromRef(B));
+  if(A_blk != Teuchos::null && B_blk != Teuchos::null)
+  {
+    return TwoMatrixMultiplyBlock(*A_blk, transposeA, *B_blk, transposeB, fos);
+  }
+
   TEUCHOS_TEST_FOR_EXCEPTION(!A.isFillComplete(), Exceptions::RuntimeError, "A is not fill-completed");
   TEUCHOS_TEST_FOR_EXCEPTION(!B.isFillComplete(), Exceptions::RuntimeError, "B is not fill-completed");
 

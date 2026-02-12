@@ -97,11 +97,17 @@ void CombinePFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::BuildP(Level& f
                                                                         Level& coarseLevel) const {
   FactoryMonitor m(*this, "Build", coarseLevel);
 
+  RCP<Matrix> A = Get<RCP<Matrix>>(fineLevel, "A");
+  using helpers = Xpetra::Helpers<Scalar, LocalOrdinal, GlobalOrdinal, Node>;
+  auto A_blk = Teuchos::rcp_dynamic_cast<BlockedCrsMatrix>(A);
+  if (A->getRowMap()->lib() == Xpetra::UseTpetra && A_blk != Teuchos::null) {
+    this->BuildPBlocked(fineLevel, coarseLevel);
+    return;
+  }
+
   const ParameterList& pL = GetParameterList();
   const LO nBlks          = as<LO>(pL.get<int>("combine: numBlks"));
   const bool useMaxLevels = pL.get<bool>("combine: useMaxLevels");
-
-  RCP<Matrix> A = Get<RCP<Matrix>>(fineLevel, "A");
 
   // Record all matrices that each define a block in block diagonal comboP
   // matrix used for PDE/multiblock interpolation.  Additionally, count
@@ -295,6 +301,78 @@ void CombinePFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::BuildP(Level& f
   Teuchos::RCP<Matrix> comboP = Teuchos::rcp(new CrsMatrixWrap(comboPCrs));
 
   Set(coarseLevel, "P", comboP);
+}
+
+template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
+void CombinePFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::BuildPBlocked(Level& fineLevel,
+                                                                        Level& coarseLevel) const {
+#ifdef HAVE_XPETRA_THYRA
+  const ParameterList& pL = GetParameterList();
+  const LO nBlks          = as<LO>(pL.get<int>("combine: numBlks"));
+  const bool useMaxLevels = pL.get<bool>("combine: useMaxLevels");
+
+  RCP<Matrix> A = Get<RCP<Matrix>>(fineLevel, "A");
+
+  bool anyCoarseGridsRemaining = false;
+
+  if (useMaxLevels) {
+    for (int j = 0; j < nBlks; j++) {
+      std::string blockName = "Psubblock" + Teuchos::toString(j);
+      anyCoarseGridsRemaining |= coarseLevel.IsAvailable(blockName, NoFactory::get());
+    };
+
+    int localAnyCoarseGridsRemaining  = anyCoarseGridsRemaining;
+    int globalAnyCoarseGridsRemaining = localAnyCoarseGridsRemaining;
+    Teuchos::reduceAll(*A->getDomainMap()->getComm(), Teuchos::REDUCE_MAX, localAnyCoarseGridsRemaining, Teuchos::ptr(&globalAnyCoarseGridsRemaining));
+
+    anyCoarseGridsRemaining |= globalAnyCoarseGridsRemaining > 0;
+  }
+
+  auto blockProlongator = Teuchos::make_rcp<Thyra::DefaultBlockedLinearOp<Scalar>>();
+  blockProlongator->beginBlockFill(nBlks, nBlks);
+
+  for (int j = 0; j < nBlks; j++) {
+
+    RCP<Matrix> P_jj;
+
+    std::string blockName = "Psubblock" + Teuchos::toString(j);
+    if (coarseLevel.IsAvailable(blockName, NoFactory::get())) {
+      P_jj = coarseLevel.Get<RCP<Matrix>>(blockName, NoFactory::get());
+    } else {
+      std::string subblockOpName = "Operatorsubblock" + Teuchos::toString(j);
+      bool hasOperator           = false;
+      if (coarseLevel.IsAvailable(subblockOpName)) {
+        auto A_blk  = coarseLevel.Get<RCP<Operator>>(subblockOpName);
+        hasOperator = A_blk != Teuchos::null;
+      }
+
+      if (useMaxLevels && anyCoarseGridsRemaining && hasOperator) {
+        // Use Psubblock = I
+        P_jj = constructIdentityProlongator<Scalar, LocalOrdinal, GlobalOrdinal, Node>(coarseLevel.Get<RCP<Operator>>(subblockOpName)->getDomainMap());
+      }
+    }
+
+#if 0
+    auto tpetra_P_jj = Xpetra::toTpetra(P_jj);
+    auto thyra_P_jj = Thyra::createConstLinearOp(tpetra_P_jj);
+    blockProlongator->setBlock(j, j, thyra_P_jj);
+#else
+    Teuchos::RCP<const Tpetra::Operator<Scalar, LocalOrdinal, GlobalOrdinal, Node>> tpetra_P_jj = Xpetra::toTpetra(P_jj);
+    Teuchos::RCP<const Thyra::LinearOpBase<Scalar>> thyra_P_jj = Thyra::createConstLinearOp(tpetra_P_jj);
+    blockProlongator->setBlock(j, j, thyra_P_jj);
+#endif
+  }
+
+  blockProlongator->endBlockFill();
+
+  Teuchos::RCP<Matrix> blockedProlongatorXpetra = Teuchos::make_rcp<Xpetra::BlockedCrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>>(blockProlongator, Teuchos::null);
+
+  blockedProlongatorXpetra->fillComplete();
+
+  Set(coarseLevel, "P", blockedProlongatorXpetra);
+#else
+  throw Exceptions::RuntimeError("CombinePFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::BuildPBlocked requires HAVE_XPETRA_THYRA!");
+#endif
 }
 
 }  // namespace MueLu

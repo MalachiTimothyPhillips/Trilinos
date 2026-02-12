@@ -126,6 +126,8 @@ class CombinePFactory : public PFactory {
   //@}
 
  private:
+
+  void BuildPBlocked(Level& fineLevel, Level& coarseLevel) const;
   int numPDEs_;
 
 };  // class CombinePFactory

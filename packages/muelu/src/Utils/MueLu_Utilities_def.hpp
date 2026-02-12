@@ -48,8 +48,31 @@ template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
 RCP<Xpetra::Matrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>>
 Utilities<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
     Transpose(Xpetra::Matrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>& Op, bool /* optimizeTranspose */, const std::string& label, const Teuchos::RCP<Teuchos::ParameterList>& params) {
-  std::string TorE = "tpetra";
 
+  auto blockOp = rcp_dynamic_cast<BlockedCrsMatrix>(rcpFromRef(Op));
+  if(blockOp != Teuchos::null)
+  {
+    auto numEntPerRow = blockOp->getLocalMaxNumRowEntries();
+
+    // swap domain/range for transpose
+    auto rangeMaps = blockOp->getBlockedDomainMap();
+    auto domainMaps = blockOp->getBlockedRangeMap();
+
+    auto blockOpT = make_rcp<BlockedCrsMatrix>(rangeMaps, domainMaps, numEntPerRow);
+    for(size_t row = 0; row < blockOp->Rows(); ++row){
+      for(size_t col = 0; col < blockOp->Cols(); ++col){
+        auto A_ij = blockOp->getMatrix(row, col);
+        auto A_ij_T = Utilities::Transpose(*A_ij);
+        blockOpT->setMatrix(row, col, A_ij_T);
+      }
+    }
+
+    blockOpT->fillComplete();
+
+    return blockOpT;
+  }
+
+  std::string TorE = "tpetra";
   if (TorE == "tpetra") {
     using Helpers = Xpetra::Helpers<Scalar, LocalOrdinal, GlobalOrdinal, Node>;
     /***************************************************************/
@@ -63,7 +86,7 @@ Utilities<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
         using Teuchos::ParameterList;
         using Teuchos::rcp;
         RCP<ParameterList> transposeParams = params.is_null() ? rcp(new ParameterList) : rcp(new ParameterList(*params));
-        transposeParams->set("sort", false);
+        transposeParams->set("sort", Node::is_gpu);
         A = transposer.createTranspose(transposeParams);
       }
 
@@ -92,7 +115,7 @@ Utilities<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
         using Teuchos::ParameterList;
         using Teuchos::rcp;
         RCP<ParameterList> transposeParams = params.is_null() ? rcp(new ParameterList) : rcp(new ParameterList(*params));
-        transposeParams->set("sort", false);
+        transposeParams->set("sort", Node::is_gpu);
         At = transposer.createTranspose(transposeParams);
       }
 
