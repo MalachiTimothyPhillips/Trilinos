@@ -60,6 +60,11 @@ class TekoSmoother : public SmootherPrototype<Scalar, LocalOrdinal, GlobalOrdina
     TEUCHOS_TEST_FOR_EXCEPTION(true, Exceptions::RuntimeError, "MueLu::TekoSmoother: Teko can only be used with SC=double. For more information refer to the doxygen documentation of TekoSmoother.");
   };
 
+  TekoSmoother(const Teuchos::ParameterList& paramList)
+    : type_("Teko smoother") {
+    TEUCHOS_TEST_FOR_EXCEPTION(true, Exceptions::RuntimeError, "MueLu::TekoSmoother: Teko can only be used with SC=double. For more information refer to the doxygen documentation of TekoSmoother.");
+  };
+
   //! Destructor
   virtual ~TekoSmoother() {}
   //@}
@@ -164,11 +169,41 @@ class TekoSmoother<double, int, GlobalOrdinal, Node> : public SmootherPrototype<
     , bThyOp_(Teuchos::null)
     , tekoParams_(Teuchos::null)
     , inverseOp_(Teuchos::null){};
+  
+  // TODO: implement parameter setting here
+  TekoSmoother(const Teuchos::ParameterList& paramList)
+    : type_("Teko smoother")
+    , A_(Teuchos::null)
+    , bA_(Teuchos::null)
+    , bThyOp_(Teuchos::null)
+    , tekoParams_(Teuchos::null)
+    , inverseOp_(Teuchos::null){
+      this->SetParameterList(paramList);
+      //SetParameter<std::string>("Inverse Type", paramList.get<std::string>("Inverse Type"))
+      //std::cout << "paramList passed in\n" << paramList << "\n";
+      auto tekoParams = paramList.sublist("Inverse Factory Library");
+      //std::cout << "tekoParams\n" << tekoParams << "\n";
+      tekoParams_ = rcpFromRef(tekoParams);
+
+      strat_ =
+      Teuchos::rcp(new Stratimikos::DefaultLinearSolverBuilder("",
+          "",
+          "",
+          "linear-solver-params-file",
+          "extra-linear-solver-params",
+          "linear-solver-params-used-file"));
+
+      // TODO: I suppose this would be a little too meta
+      //Stratimikos::enableMueLu<Scalar, LocalOrdinal, GlobalOrdinal, Node>(*strat_);
+
+      Teko::addToStratimikosBuilder(strat_);
+    };
 
   //! Destructor
   virtual ~TekoSmoother() {}
   //@}
 
+#if 0
   //! Input
   //@{
   RCP<const ParameterList> GetValidParameterList() const {
@@ -176,9 +211,12 @@ class TekoSmoother<double, int, GlobalOrdinal, Node> : public SmootherPrototype<
 
     validParamList->set<RCP<const FactoryBase> >("A", null, "Generating factory of the matrix A");
     validParamList->set<std::string>("Inverse Type", "", "Name of parameter list within 'Teko parameters' containing the Teko smoother parameters.");
+    //ParameterList null_pl;
+    //validParamList->set<Teuchos::ParameterList>("Inverse Factory Library", null_pl, "Teko parameters.");
 
     return validParamList;
   }
+#endif
 
   void DeclareInput(Level &currentLevel) const {
     this->Input(currentLevel, "A");
@@ -216,15 +254,24 @@ class TekoSmoother<double, int, GlobalOrdinal, Node> : public SmootherPrototype<
     // parameter list contains TekoSmoother parameters but does not handle the Teko parameters itself!
     const ParameterList &pL  = Factory::GetParameterList();
     std::string smootherType = pL.get<std::string>("Inverse Type");
+    std::cout << "Factory level params = \n" << pL << "\n";
     TEUCHOS_TEST_FOR_EXCEPTION(smootherType.empty(), Exceptions::RuntimeError,
                                "MueLu::TekoSmoother::Build: You must provide a 'Smoother Type' name that is defined in the 'Teko parameters' sublist.");
     type_ = smootherType;
 
+#if 0
     TEUCHOS_TEST_FOR_EXCEPTION(tekoParams_.is_null(), Exceptions::BadCast,
                                "MueLu::TekoSmoother::Build: No Teko parameters have been set.");
 
-    Teuchos::RCP<Teko::InverseLibrary> invLib  = Teko::InverseLibrary::buildFromParameterList(*tekoParams_);
+    std::cout << "Teko params = \n" << *tekoParams_ << "\n";
+    Teuchos::RCP<Teko::InverseLibrary> invLib  = Teko::InverseLibrary::buildFromParameterList(*tekoParams_, strat_);
     Teuchos::RCP<Teko::InverseFactory> inverse = invLib->getInverseFactory(smootherType);
+#else
+    const auto & teko_params = pL.sublist("Inverse Factory Library");
+    std::cout << "Teko params = \n" << teko_params << "\n";
+    Teuchos::RCP<Teko::InverseLibrary> invLib  = Teko::InverseLibrary::buildFromParameterList(teko_params, strat_);
+    Teuchos::RCP<Teko::InverseFactory> inverse = invLib->getInverseFactory(smootherType);
+#endif
 
     inverseOp_ = Teko::buildInverse(*inverse, thyOp);
     TEUCHOS_TEST_FOR_EXCEPTION(inverseOp_.is_null(), Exceptions::BadCast,
@@ -281,7 +328,9 @@ class TekoSmoother<double, int, GlobalOrdinal, Node> : public SmootherPrototype<
     Teuchos::RCP<Xpetra::MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node> > XX =
         Xpetra::ThyraUtils<Scalar, LocalOrdinal, GlobalOrdinal, Node>::toXpetra(thyX, comm);
 
+    std::cout << "Calling X.update\n";
     X.update(Teuchos::ScalarTraits<Scalar>::one(), *XX, Teuchos::ScalarTraits<Scalar>::zero());
+    std::cout << "Done calling X.update\n";
   }
   //@}
 
@@ -331,6 +380,8 @@ class TekoSmoother<double, int, GlobalOrdinal, Node> : public SmootherPrototype<
   RCP<ParameterList> tekoParams_;  // < ! parameter list containing Teko parameters. These parameters are not administrated by the factory and not validated.
 
   Teko::LinearOp inverseOp_;  // < ! Teko inverse operator
+
+  Teuchos::RCP<Stratimikos::DefaultLinearSolverBuilder> strat_;
 };                            // class TekoSmoother (specialization on SC=double)
 }  // namespace MueLu
 

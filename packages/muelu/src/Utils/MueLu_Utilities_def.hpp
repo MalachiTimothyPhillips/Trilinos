@@ -63,7 +63,7 @@ Utilities<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
       for(size_t col = 0; col < blockOp->Cols(); ++col){
         auto A_ij = blockOp->getMatrix(row, col);
         auto A_ij_T = Utilities::Transpose(*A_ij);
-        blockOpT->setMatrix(row, col, A_ij_T);
+        blockOpT->setMatrix(col, row, A_ij_T);
       }
     }
 
