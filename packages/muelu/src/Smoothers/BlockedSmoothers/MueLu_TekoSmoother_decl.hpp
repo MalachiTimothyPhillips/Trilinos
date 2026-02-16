@@ -179,12 +179,10 @@ class TekoSmoother<double, int, GlobalOrdinal, Node> : public SmootherPrototype<
     , tekoParams_(Teuchos::null)
     , inverseOp_(Teuchos::null){
       this->SetParameterList(paramList);
-      //SetParameter<std::string>("Inverse Type", paramList.get<std::string>("Inverse Type"))
-      //std::cout << "paramList passed in\n" << paramList << "\n";
       auto tekoParams = paramList.sublist("Inverse Factory Library");
-      //std::cout << "tekoParams\n" << tekoParams << "\n";
       tekoParams_ = rcpFromRef(tekoParams);
 
+      // TODO: is this step strictly necessary?
       strat_ =
       Teuchos::rcp(new Stratimikos::DefaultLinearSolverBuilder("",
           "",
@@ -193,30 +191,12 @@ class TekoSmoother<double, int, GlobalOrdinal, Node> : public SmootherPrototype<
           "extra-linear-solver-params",
           "linear-solver-params-used-file"));
 
-      // TODO: I suppose this would be a little too meta
-      //Stratimikos::enableMueLu<Scalar, LocalOrdinal, GlobalOrdinal, Node>(*strat_);
-
       Teko::addToStratimikosBuilder(strat_);
     };
 
   //! Destructor
   virtual ~TekoSmoother() {}
   //@}
-
-#if 0
-  //! Input
-  //@{
-  RCP<const ParameterList> GetValidParameterList() const {
-    RCP<ParameterList> validParamList = rcp(new ParameterList());
-
-    validParamList->set<RCP<const FactoryBase> >("A", null, "Generating factory of the matrix A");
-    validParamList->set<std::string>("Inverse Type", "", "Name of parameter list within 'Teko parameters' containing the Teko smoother parameters.");
-    //ParameterList null_pl;
-    //validParamList->set<Teuchos::ParameterList>("Inverse Factory Library", null_pl, "Teko parameters.");
-
-    return validParamList;
-  }
-#endif
 
   void DeclareInput(Level &currentLevel) const {
     this->Input(currentLevel, "A");
@@ -254,24 +234,13 @@ class TekoSmoother<double, int, GlobalOrdinal, Node> : public SmootherPrototype<
     // parameter list contains TekoSmoother parameters but does not handle the Teko parameters itself!
     const ParameterList &pL  = Factory::GetParameterList();
     std::string smootherType = pL.get<std::string>("Inverse Type");
-    std::cout << "Factory level params = \n" << pL << "\n";
     TEUCHOS_TEST_FOR_EXCEPTION(smootherType.empty(), Exceptions::RuntimeError,
                                "MueLu::TekoSmoother::Build: You must provide a 'Smoother Type' name that is defined in the 'Teko parameters' sublist.");
     type_ = smootherType;
 
-#if 0
-    TEUCHOS_TEST_FOR_EXCEPTION(tekoParams_.is_null(), Exceptions::BadCast,
-                               "MueLu::TekoSmoother::Build: No Teko parameters have been set.");
-
-    std::cout << "Teko params = \n" << *tekoParams_ << "\n";
-    Teuchos::RCP<Teko::InverseLibrary> invLib  = Teko::InverseLibrary::buildFromParameterList(*tekoParams_, strat_);
-    Teuchos::RCP<Teko::InverseFactory> inverse = invLib->getInverseFactory(smootherType);
-#else
     const auto & teko_params = pL.sublist("Inverse Factory Library");
-    std::cout << "Teko params = \n" << teko_params << "\n";
     Teuchos::RCP<Teko::InverseLibrary> invLib  = Teko::InverseLibrary::buildFromParameterList(teko_params, strat_);
     Teuchos::RCP<Teko::InverseFactory> inverse = invLib->getInverseFactory(smootherType);
-#endif
 
     inverseOp_ = Teko::buildInverse(*inverse, thyOp);
     TEUCHOS_TEST_FOR_EXCEPTION(inverseOp_.is_null(), Exceptions::BadCast,
@@ -286,7 +255,7 @@ class TekoSmoother<double, int, GlobalOrdinal, Node> : public SmootherPrototype<
   @param B right-hand side
   @param InitialGuessIsZero This option has no effect.
   */
-  void Apply(MultiVector &X, const MultiVector &B, bool /* InitialGuessIsZero */ = false) const {
+  void Apply(MultiVector &X, const MultiVector &B, bool InitialGuessIsZero = false) const {
     TEUCHOS_TEST_FOR_EXCEPTION(this->IsSetup() == false, Exceptions::RuntimeError,
                                "MueLu::TekoSmoother::Apply(): Setup() has not been called");
 
@@ -314,23 +283,55 @@ class TekoSmoother<double, int, GlobalOrdinal, Node> : public SmootherPrototype<
     TEUCHOS_TEST_FOR_EXCEPTION(thyProdX.is_null(), Exceptions::BadCast,
                                "MueLu::TekoSmoother::Apply: Failed to cast domain space to product domain space.");
 
-    // copy RHS vector X to Thyra::MultiVectorBase thyProdX
-    Xpetra::ThyraUtils<Scalar, LocalOrdinal, GlobalOrdinal, Node>::updateThyra(Teuchos::rcpFromRef(X), rgMapExtractor, thyProdX);
+#if 1    
+    if(InitialGuessIsZero)
+    {
+      thyX->assign(0.0);
+      inverseOp_->apply(
+          Thyra::NOTRANS,
+          *thyB,       // const MultiVectorBase<Scalar> &X,
+          thyX.ptr(),  // const Ptr<MultiVectorBase<Scalar> > &Y,
+          1.0,
+          0.0);
+      // copy back content of Ptr<Thyra::MultiVectorBase> thyX into X
+      Teuchos::RCP<Xpetra::MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node> > XX =
+          Xpetra::ThyraUtils<Scalar, LocalOrdinal, GlobalOrdinal, Node>::toXpetra(thyX, comm);
 
-    inverseOp_->apply(
-        Thyra::NOTRANS,
-        *thyB,       // const MultiVectorBase<Scalar> &X,
-        thyX.ptr(),  // const Ptr<MultiVectorBase<Scalar> > &Y,
-        1.0,
-        0.0);
+      X.update(Teuchos::ScalarTraits<Scalar>::one(), *XX, Teuchos::ScalarTraits<Scalar>::zero());
+    } else {
+      // copy RHS vector X to Thyra::MultiVectorBase thyProdX
+      //Xpetra::ThyraUtils<Scalar, LocalOrdinal, GlobalOrdinal, Node>::updateThyra(Teuchos::rcpFromRef(X), rgMapExtractor, thyProdX);
+      inverseOp_->apply(
+          Thyra::NOTRANS,
+          *thyB,       // const MultiVectorBase<Scalar> &X,
+          thyX.ptr(),  // const Ptr<MultiVectorBase<Scalar> > &Y,
+          1.0,
+          0.0);
 
-    // copy back content of Ptr<Thyra::MultiVectorBase> thyX into X
-    Teuchos::RCP<Xpetra::MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node> > XX =
-        Xpetra::ThyraUtils<Scalar, LocalOrdinal, GlobalOrdinal, Node>::toXpetra(thyX, comm);
+      // copy back content of Ptr<Thyra::MultiVectorBase> thyX into X
+      Teuchos::RCP<Xpetra::MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node> > XX =
+          Xpetra::ThyraUtils<Scalar, LocalOrdinal, GlobalOrdinal, Node>::toXpetra(thyX, comm);
 
-    std::cout << "Calling X.update\n";
-    X.update(Teuchos::ScalarTraits<Scalar>::one(), *XX, Teuchos::ScalarTraits<Scalar>::zero());
-    std::cout << "Done calling X.update\n";
+      X.update(Teuchos::ScalarTraits<Scalar>::one(), *XX, Teuchos::ScalarTraits<Scalar>::one());
+    }
+#else
+     // copy RHS vector X to Thyra::MultiVectorBase thyProdX
+     Xpetra::ThyraUtils<Scalar, LocalOrdinal, GlobalOrdinal, Node>::updateThyra(Teuchos::rcpFromRef(X), rgMapExtractor, thyProdX);
+ 
+     inverseOp_->apply(
+         Thyra::NOTRANS,
+         *thyB,       // const MultiVectorBase<Scalar> &X,
+         thyX.ptr(),  // const Ptr<MultiVectorBase<Scalar> > &Y,
+         1.0,
+         0.0);
+ 
+     // copy back content of Ptr<Thyra::MultiVectorBase> thyX into X
+     Teuchos::RCP<Xpetra::MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node> > XX =
+         Xpetra::ThyraUtils<Scalar, LocalOrdinal, GlobalOrdinal, Node>::toXpetra(thyX, comm);
+ 
+     X.update(Teuchos::ScalarTraits<Scalar>::one(), *XX, Teuchos::ScalarTraits<Scalar>::zero());
+#endif
+
   }
   //@}
 

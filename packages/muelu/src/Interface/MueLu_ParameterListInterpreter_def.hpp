@@ -991,6 +991,11 @@ void ParameterListInterpreter<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
         coarseSmoother = rcp(new MatlabSmoother(coarseParams));
       else
 #endif
+#ifdef HAVE_MUELU_TEKO
+      if (coarseType == "teko")
+        coarseSmoother = rcp(new TekoSmoother(coarseParams));
+      else
+#endif
         coarseSmoother = rcp(new DirectSolver(coarseType, coarseParams));
     }
 

@@ -453,8 +453,6 @@ RCP<InverseLibrary> InverseLibrary::buildFromParameterList(
   // build from Stratimikos or allocate a new inverse library
   RCP<InverseLibrary> invLib = InverseLibrary::buildFromStratimikos(strat);
 
-  std::cout << "Parameters:\n" << pl << "\n";
-
   // to convert the void* like entry
   Teuchos::ParameterList* temp = 0;
 
@@ -465,13 +463,9 @@ RCP<InverseLibrary> InverseLibrary::buildFromParameterList(
     std::string label            = itr->first;
     Teuchos::ParameterList& list = itr->second.getValue(temp);
 
-    std::cout << "label = " << label << ", list = \n" << list << "\n";
-
     // add to library
     invLib->addInverse(label, list);
   }
-
-  std::cout << "Returning invLib\n";
 
   return invLib;
 }
