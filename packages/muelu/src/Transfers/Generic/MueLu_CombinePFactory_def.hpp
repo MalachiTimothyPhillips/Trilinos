@@ -303,6 +303,66 @@ void CombinePFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::BuildP(Level& f
   Set(coarseLevel, "P", comboP);
 }
 
+namespace impl
+{
+template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
+class WrapProlongatorOperator : public Tpetra::Operator<Scalar, LocalOrdinal, GlobalOrdinal, Node>
+{
+public:
+  WrapProlongatorOperator(RCP<const Tpetra::Operator<Scalar, LocalOrdinal, GlobalOrdinal, Node>> maybeOperator, RCP<const Tpetra::Map<LocalOrdinal, GlobalOrdinal, Node>> rangeMap, GlobalOrdinal indexBase)
+  : maybeOperator_(maybeOperator),
+    rangeMap_(rangeMap),
+    indexBase_(indexBase)
+  {
+    using device_type = typename Node::device_type;
+    Kokkos::View<const GlobalOrdinal*, device_type> indexList;
+    if(maybeOperator_){
+      const auto baseDomainMap = maybeOperator_->getDomainMap();
+      indexList = baseDomainMap->getMyGlobalIndicesDevice();
+    }
+
+    GlobalOrdinal numGlobalElements = Teuchos::OrdinalTraits<GlobalOrdinal>::invalid();
+    auto comm = rangeMap_->getComm();
+    domainMap_ = Teuchos::make_rcp<Tpetra::Map<LocalOrdinal, GlobalOrdinal, Node>>(numGlobalElements, indexList, indexBase_, comm);
+  }
+
+  RCP<const Tpetra::Map<LocalOrdinal, GlobalOrdinal, Node> > getDomainMap() const override { return domainMap_; }
+  RCP<const Tpetra::Map<LocalOrdinal, GlobalOrdinal, Node> > getRangeMap() const override { return rangeMap_; }
+
+  void
+  apply(const Tpetra::MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node> &X,
+        Tpetra::MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node> &Y,
+        Teuchos::ETransp mode = Teuchos::NO_TRANS,
+        Scalar alpha          = Teuchos::ScalarTraits<Scalar>::one(),
+        Scalar beta           = Teuchos::ScalarTraits<Scalar>::zero()) const override
+  {
+    if(!maybeOperator_) return;
+    maybeOperator_->apply(X, Y, mode, alpha, beta);
+  }
+
+private:
+  RCP<const Tpetra::Operator<Scalar, LocalOrdinal, GlobalOrdinal, Node>> maybeOperator_;
+  RCP<const Tpetra::Map<LocalOrdinal, GlobalOrdinal, Node>> domainMap_;
+  RCP<const Tpetra::Map<LocalOrdinal, GlobalOrdinal, Node>> rangeMap_;
+  GlobalOrdinal indexBase_;
+};
+
+template <class LocalOrdinal, class GlobalOrdinal, class Node>
+RCP<const Tpetra::Map<LocalOrdinal, GlobalOrdinal, Node>>
+appendEmptyProcsToMap(RCP<const Tpetra::Map<LocalOrdinal, GlobalOrdinal, Node>> inputMap, GlobalOrdinal indexBase, RCP<const Teuchos::Comm<int>> comm)
+{
+  using device_type = typename Node::device_type;
+  Kokkos::View<const GlobalOrdinal*, device_type> indexList;
+  if(inputMap){
+    indexList = inputMap->getMyGlobalIndicesDevice();
+  }
+
+  GlobalOrdinal numGlobalElements = Teuchos::OrdinalTraits<GlobalOrdinal>::invalid();
+  return Teuchos::make_rcp<const Tpetra::Map<LocalOrdinal, GlobalOrdinal, Node>>(numGlobalElements, indexList, indexBase, comm);
+}
+
+}
+
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
 void CombinePFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::BuildPBlocked(Level& fineLevel,
                                                                         Level& coarseLevel) const {
@@ -352,15 +412,9 @@ void CombinePFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::BuildPBlocked(L
       }
     }
 
-#if 0
-    auto tpetra_P_jj = Xpetra::toTpetra(P_jj);
+    RCP<const Tpetra::Operator<Scalar, LocalOrdinal, GlobalOrdinal, Node>> tpetra_P_jj = Xpetra::toTpetra(P_jj);
     auto thyra_P_jj = Thyra::createConstLinearOp(tpetra_P_jj);
     blockProlongator->setBlock(j, j, thyra_P_jj);
-#else
-    Teuchos::RCP<const Tpetra::Operator<Scalar, LocalOrdinal, GlobalOrdinal, Node>> tpetra_P_jj = Xpetra::toTpetra(P_jj);
-    Teuchos::RCP<const Thyra::LinearOpBase<Scalar>> thyra_P_jj = Thyra::createConstLinearOp(tpetra_P_jj);
-    blockProlongator->setBlock(j, j, thyra_P_jj);
-#endif
   }
 
   blockProlongator->endBlockFill();
