@@ -398,18 +398,9 @@ void CombinePFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::BuildPBlocked(L
     std::string blockName = "Psubblock" + Teuchos::toString(j);
     if (coarseLevel.IsAvailable(blockName, NoFactory::get())) {
       P_jj = coarseLevel.Get<RCP<Matrix>>(blockName, NoFactory::get());
-    } else {
+    } else if (useMaxLevels && anyCoarseGridsRemaining) {
       std::string subblockOpName = "Operatorsubblock" + Teuchos::toString(j);
-      bool hasOperator           = false;
-      if (coarseLevel.IsAvailable(subblockOpName)) {
-        auto A_blk  = coarseLevel.Get<RCP<Operator>>(subblockOpName);
-        hasOperator = A_blk != Teuchos::null;
-      }
-
-      if (useMaxLevels && anyCoarseGridsRemaining && hasOperator) {
-        // Use Psubblock = I
-        P_jj = constructIdentityProlongator<Scalar, LocalOrdinal, GlobalOrdinal, Node>(coarseLevel.Get<RCP<Operator>>(subblockOpName)->getDomainMap());
-      }
+      P_jj = constructIdentityProlongator<Scalar, LocalOrdinal, GlobalOrdinal, Node>(fineLevel.Get<RCP<Operator>>(subblockOpName)->getDomainMap());
     }
 
     RCP<const Tpetra::Operator<Scalar, LocalOrdinal, GlobalOrdinal, Node>> tpetra_P_jj = Xpetra::toTpetra(P_jj);
