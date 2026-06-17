@@ -50,12 +50,11 @@
 #include "Teko_ALOperator.hpp"
 #include "Teko_ConfigDefs.hpp"
 
+using Teuchos::RCP;
+using Teuchos::rcp;
 using namespace Teko;
 
 TEUCHOS_UNIT_TEST(tALOperator, test_tpetra) {
-  Tpetra::ScopeGuard scopeGuard(Teuchos::UnitTestRepository::getCLP().argc,
-                                Teuchos::UnitTestRepository::getCLP().argv);
-
   using ST = Teko::ST;
   using LO = Teko::LO;
   using GO = Teko::GO;
@@ -76,13 +75,12 @@ TEUCHOS_UNIT_TEST(tALOperator, test_tpetra) {
   const GO numPre = 2;
   int errCode     = 0;
 
-  RCP<const map_t> mapVel = Teuchos::rcp(new map_t(numVel, 0, comm));
-  RCP<const map_t> mapPre = Teuchos::rcp(new map_t(numPre, 0, comm));
-  RCP<const map_t> mapAll = Teuchos::rcp(new map_t(numVel * dim + numPre, 0, comm));
+  RCP<const map_t> mapVel = rcp(new map_t(numVel, 0, comm));
+  RCP<const map_t> mapPre = rcp(new map_t(numPre, 0, comm));
+  RCP<const map_t> mapAll = rcp(new map_t(numVel * dim + numPre, 0, comm));
 
   // Build reordered global IDs
   std::vector<GO> reorderedVec;
-  const auto invalidLO = Teuchos::OrdinalTraits<LO>::invalid();
 
   for (LO lid = 0; lid < static_cast<LO>(mapVel->getLocalNumElements()); ++lid) {
     GO gid0 = mapVel->getGlobalElement(lid);
@@ -97,11 +95,11 @@ TEUCHOS_UNIT_TEST(tALOperator, test_tpetra) {
   }
 
   RCP<const map_t> mapReorder =
-      Teuchos::rcp(new map_t(Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid(),
-                             Teuchos::ArrayView<const GO>(reorderedVec), 0, comm));
+      rcp(new map_t(Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid(),
+                    Teuchos::ArrayView<const GO>(reorderedVec), 0, comm));
 
   RCP<Tpetra::Import<LO, GO, NT> > importReorder =
-      Teuchos::rcp(new Tpetra::Import<LO, GO, NT>(mapAll, mapReorder));
+      rcp(new Tpetra::Import<LO, GO, NT>(mapAll, mapReorder));
 
   // Build blocked vector of GIDs
   std::vector<std::vector<GO> > blockedVec;
@@ -139,7 +137,7 @@ TEUCHOS_UNIT_TEST(tALOperator, test_tpetra) {
   TEST_ASSERT(!ptrExact.is_null());
 
   // Reorder matrix
-  RCP<crs_t> mat = Teuchos::rcp(new crs_t(mapReorder, ptrMat->getGlobalMaxNumRowEntries()));
+  RCP<crs_t> mat = rcp(new crs_t(mapReorder, ptrMat->getGlobalMaxNumRowEntries()));
   mat->doImport(*ptrMat, *importReorder, Tpetra::INSERT);
   mat->fillComplete();
 
