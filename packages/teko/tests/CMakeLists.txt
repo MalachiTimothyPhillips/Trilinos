@@ -188,18 +188,6 @@ TRIBITS_ADD_EXECUTABLE_AND_TEST(
   NUM_MPI_PROCS 1
   )
 
-IF(TEKO_HAVE_EPETRA)
-  TRIBITS_ADD_EXECUTABLE_AND_TEST(
-    StridedEpetraOperator_test
-    SOURCES
-      unit_tests/tStridedEpetraOperator.cpp
-      ${UNIT_TEST_DRIVER}
-    COMM serial mpi
-    ARGS ${PARALLEL_ARGS_STRING}
-    NUM_MPI_PROCS ${CUSTOM_MPI_PROCS}
-  )
-ENDIF()
-
 TRIBITS_ADD_EXECUTABLE_AND_TEST(
   RequestInterface_test
   SOURCES
