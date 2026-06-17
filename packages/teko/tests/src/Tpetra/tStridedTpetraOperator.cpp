@@ -27,19 +27,28 @@
 #include "Teuchos_CommandLineProcessor.hpp"
 #include "Teuchos_StandardCatchMacros.hpp"
 
+// Tpetra includes
+#include "Tpetra_Core.hpp"
 #include "Tpetra_Vector.hpp"
 #include "Tpetra_CrsMatrix.hpp"
 
-#include "tStridedTpetraOperator.hpp"
+// Galeri / Xpetra
+#include "Galeri_XpetraMaps.hpp"
+#include "Galeri_XpetraProblemFactory.hpp"
+#include "Galeri_XpetraParameters.hpp"
 
-#include "Trilinos_Util_CrsMatrixGallery.h"
+#include "Xpetra_Map.hpp"
+#include "Xpetra_Matrix.hpp"
+#include "Xpetra_TpetraMap.hpp"
+#include "Xpetra_TpetraCrsMatrix.hpp"
+
+#include "tStridedTpetraOperator.hpp"
 
 #include "Teko_StridedTpetraOperator.hpp"
 #include "Teko_TpetraHelpers.hpp"
 #include "Teko_ConfigDefs.hpp"
 
-namespace Teko {
-namespace Test {
+namespace Teko::Test {
 
 using Teuchos::null;
 using Teuchos::RCP;
@@ -49,6 +58,59 @@ using Thyra::createMember;
 using Thyra::LinearOpBase;
 using Thyra::LinearOpTester;
 using Thyra::VectorBase;
+
+namespace {
+
+using ST = Teko::ST;
+using LO = Teko::LO;
+using GO = Teko::GO;
+using NT = Teko::NT;
+
+using map_t = Tpetra::Map<LO, GO, NT>;
+using crs_t = Tpetra::CrsMatrix<ST, LO, GO, NT>;
+using mv_t  = Tpetra::MultiVector<ST, LO, GO, NT>;
+
+RCP<crs_t> buildRecirc2DMatrix(const RCP<const Teuchos::Comm<int> >& comm, GO nx, GO ny) {
+  Teuchos::ParameterList galeriList;
+  galeriList.set("nx", nx);
+  galeriList.set("ny", ny);
+  galeriList.set("mx", comm->getSize());
+  galeriList.set("my", 1);
+  galeriList.set("lx", 1.0);
+  galeriList.set("ly", 1.0);
+  galeriList.set("diff", 1e-5);
+  galeriList.set("conv", 1.0);
+
+  RCP<const Xpetra::Map<LO, GO, NT> > xMap =
+      Galeri::Xpetra::CreateMap<LO, GO, NT>(Xpetra::UseTpetra, "Cartesian2D", comm, galeriList);
+
+  RCP<const map_t> tMap = Xpetra::toTpetra(xMap);
+
+  auto problem =
+      Galeri::Xpetra::BuildProblem<ST, LO, GO, map_t, crs_t, mv_t>("Recirc2D", tMap, galeriList);
+
+  return problem->BuildMatrix();
+}
+
+ST relativeError(const mv_t& a, const mv_t& b) {
+  mv_t diff(a, Teuchos::Copy);
+  diff.update(ST(-1.0), b, ST(1.0));
+
+  Teuchos::Array<ST> diffNorms(diff.getNumVectors());
+  Teuchos::Array<ST> trueNorms(b.getNumVectors());
+
+  diff.norm2(diffNorms());
+  b.norm2(trueNorms());
+
+  ST maxRel = ST(0.0);
+  for (size_t i = 0; i < size_t(diffNorms.size()); ++i) {
+    ST rel = (trueNorms[i] == ST(0.0)) ? diffNorms[i] : diffNorms[i] / trueNorms[i];
+    maxRel = std::max(maxRel, rel);
+  }
+  return maxRel;
+}
+
+}  // namespace
 
 void tStridedTpetraOperator::initializeTest() { tolerance_ = 1e-14; }
 
@@ -61,44 +123,46 @@ int tStridedTpetraOperator::runTest(int verbosity, std::ostream& stdstrm, std::o
   failstrm << "tStridedTpetraOperator";
 
   status = test_numvars_constr(verbosity, failstrm);
-  Teko_TEST_MSG(stdstrm, 1, "   \"numvars_constr\" ... PASSED", "   \"numvars_constr\" ... FAILED");
+  Teko_TEST_MSG_tpetra(stdstrm, 1, "   \"numvars_constr\" ... PASSED",
+                       "   \"numvars_constr\" ... FAILED");
   allTests &= status;
   failcount += status ? 0 : 1;
   totalrun++;
 
   status = test_vector_constr(verbosity, failstrm);
-  Teko_TEST_MSG(stdstrm, 1, "   \"vector_constr\" ... PASSED", "   \"vector_constr\" ... FAILED");
+  Teko_TEST_MSG_tpetra(stdstrm, 1, "   \"vector_constr\" ... PASSED",
+                       "   \"vector_constr\" ... FAILED");
   allTests &= status;
   failcount += status ? 0 : 1;
   totalrun++;
 
   status = test_reorder(verbosity, failstrm, 0);
-  Teko_TEST_MSG(stdstrm, 1, "   \"reorder(flat reorder)\" ... PASSED",
-                "   \"reorder(flat reorder)\" ... FAILED");
+  Teko_TEST_MSG_tpetra(stdstrm, 1, "   \"reorder(flat reorder)\" ... PASSED",
+                       "   \"reorder(flat reorder)\" ... FAILED");
   allTests &= status;
   failcount += status ? 0 : 1;
   totalrun++;
 
   status = test_reorder(verbosity, failstrm, 1);
-  Teko_TEST_MSG(stdstrm, 1, "   \"reorder(composite reorder = " << 1 << ")\" ... PASSED",
-                "   \"reorder(composite reorder)\" ... FAILED");
+  Teko_TEST_MSG_tpetra(stdstrm, 1, "   \"reorder(composite reorder = " << 1 << ")\" ... PASSED",
+                       "   \"reorder(composite reorder)\" ... FAILED");
   allTests &= status;
   failcount += status ? 0 : 1;
   totalrun++;
 
   status = test_reorder(verbosity, failstrm, 2);
-  Teko_TEST_MSG(stdstrm, 1, "   \"reorder(composite reorder = " << 2 << ")\" ... PASSED",
-                "   \"reorder(composite reorder)\" ... FAILED");
+  Teko_TEST_MSG_tpetra(stdstrm, 1, "   \"reorder(composite reorder = " << 2 << ")\" ... PASSED",
+                       "   \"reorder(composite reorder)\" ... FAILED");
   allTests &= status;
   failcount += status ? 0 : 1;
   totalrun++;
 
   status = allTests;
   if (verbosity >= 10) {
-    Teko_TEST_MSG(failstrm, 0, "tStridedTpetraOperator...PASSED",
-                  "tStridedTpetraOperator...FAILED");
-  } else {  // Normal Operating Procedures (NOP)
-    Teko_TEST_MSG(failstrm, 0, "...PASSED", "tStridedTpetraOperator...FAILED");
+    Teko_TEST_MSG_tpetra(failstrm, 0, "tStridedTpetraOperator...PASSED",
+                         "tStridedTpetraOperator...FAILED");
+  } else {
+    Teko_TEST_MSG_tpetra(failstrm, 0, "...PASSED", "tStridedTpetraOperator...FAILED");
   }
 
   return failcount;
@@ -108,59 +172,39 @@ bool tStridedTpetraOperator::test_numvars_constr(int verbosity, std::ostream& os
   bool status    = false;
   bool allPassed = true;
 
-  const Epetra_Comm& comm_epetra             = *GetComm();
   RCP<const Teuchos::Comm<int> > comm_tpetra = GetComm_tpetra();
 
   TEST_MSG("\n   tStridedTpetraOperator::test_numvars: "
-           << "Running on " << comm_epetra.NumProc() << " processors");
+           << "Running on " << comm_tpetra->getSize() << " processors");
 
-  // pick
-  int nx = 3 * comm_epetra.NumProc();  // 3 * 25 * comm_epetra.NumProc();
-  int ny = 3 * comm_epetra.NumProc();  // 3 * 50 * comm_epetra.NumProc();
+  GO nx = 3 * comm_tpetra->getSize();
+  GO ny = 3 * comm_tpetra->getSize();
 
-  // create a big matrix to play with
-  // note: this matrix is not really strided
-  //       however, I just need a nontrivial
-  //       matrix to play with
-  Trilinos_Util::CrsMatrixGallery FGallery("recirc_2d", comm_epetra, false);
-  FGallery.Set("nx", nx);
-  FGallery.Set("ny", ny);
-  RCP<Epetra_CrsMatrix> epetraA = rcp(FGallery.GetMatrix(), false);
-  RCP<Tpetra::CrsMatrix<ST, LO, GO, NT> > A =
-      Teko::TpetraHelpers::nonConstEpetraCrsMatrixToTpetra(epetraA, comm_tpetra);
+  RCP<crs_t> A  = buildRecirc2DMatrix(comm_tpetra, nx, ny);
   ST beforeNorm = A->getFrobeniusNorm();
 
   int vars  = 3;
   int width = 3;
-  Tpetra::MultiVector<ST, LO, GO, NT> x(A->getDomainMap(), width);
-  Tpetra::MultiVector<ST, LO, GO, NT> ys(A->getRangeMap(), width);
-  Tpetra::MultiVector<ST, LO, GO, NT> y(A->getRangeMap(), width);
+  mv_t x(A->getDomainMap(), width);
+  mv_t ys(A->getRangeMap(), width);
+  mv_t y(A->getRangeMap(), width);
 
   Teko::TpetraHelpers::StridedTpetraOperator shell(vars, A);
 
-  // test the operator against a lot of random vectors
   int numtests = 10;
   ST max       = 0.0;
   ST min       = 1.0;
   for (int i = 0; i < numtests; i++) {
-    std::vector<ST> norm(width);
-    std::vector<ST> rel(width);
     x.randomize();
 
     shell.apply(x, y);
     A->apply(x, ys);
 
-    Tpetra::MultiVector<ST, LO, GO, NT> e(y, Teuchos::Copy);
-    e.update(-1.0, ys, 1.0);
-    e.norm2(Teuchos::ArrayView<ST>(norm));
-
-    // compute relative error
-    ys.norm2(Teuchos::ArrayView<ST>(rel));
-    for (int j = 0; j < width; j++) {
-      max = max > norm[j] / rel[j] ? max : norm[j] / rel[j];
-      min = min < norm[j] / rel[j] ? min : norm[j] / rel[j];
-    }
+    ST err = relativeError(y, ys);
+    max    = std::max(max, err);
+    min    = std::min(min, err);
   }
+
   TEST_ASSERT(max >= min, "\n   tStridedTpetraOperator::test_numvars_constr: "
                               << toString(status) << ": "
                               << "sanity checked - " << max << " >= " << min);
@@ -169,7 +213,7 @@ bool tStridedTpetraOperator::test_numvars_constr(int verbosity, std::ostream& os
                                      << "testing tolerance over many matrix vector multiplies ( "
                                      << max << " <= " << tolerance_ << " )");
 
-  A->scale(2.0);  // double everything
+  A->scale(2.0);
 
   ST afterNorm = A->getFrobeniusNorm();
   TEST_ASSERT(beforeNorm != afterNorm, "\n   tStridedTpetraOperator::test_numvars_constr "
@@ -178,29 +222,20 @@ bool tStridedTpetraOperator::test_numvars_constr(int verbosity, std::ostream& os
 
   shell.RebuildOps();
 
-  // test the operator against a lot of random vectors
   numtests = 10;
   max      = 0.0;
   min      = 1.0;
   for (int i = 0; i < numtests; i++) {
-    std::vector<ST> norm(width);
-    std::vector<ST> rel(width);
     x.randomize();
 
     shell.apply(x, y);
     A->apply(x, ys);
 
-    Tpetra::MultiVector<ST, LO, GO, NT> e(y, Teuchos::Copy);
-    e.update(-1.0, ys, 1.0);
-    e.norm2(Teuchos::ArrayView<ST>(norm));
-
-    // compute relative error
-    ys.norm2(Teuchos::ArrayView<ST>(rel));
-    for (int j = 0; j < width; j++) {
-      max = max > norm[j] / rel[j] ? max : norm[j] / rel[j];
-      min = min < norm[j] / rel[j] ? min : norm[j] / rel[j];
-    }
+    ST err = relativeError(y, ys);
+    max    = std::max(max, err);
+    min    = std::min(min, err);
   }
+
   TEST_ASSERT(max >= min, "\n   tStridedTpetraOperator::test_numvars_constr (rebuild): "
                               << toString(status) << ": "
                               << "sanity checked - " << max << " >= " << min);
@@ -216,61 +251,41 @@ bool tStridedTpetraOperator::test_vector_constr(int verbosity, std::ostream& os)
   bool status    = false;
   bool allPassed = true;
 
-  const Epetra_Comm& comm_epetra             = *GetComm();
   RCP<const Teuchos::Comm<int> > comm_tpetra = GetComm_tpetra();
 
   TEST_MSG("\n   tStridedTpetraOperator::test_vector_constr: "
-           << "Running on " << comm_epetra.NumProc() << " processors");
+           << "Running on " << comm_tpetra->getSize() << " processors");
 
-  // pick
-  int nx = 3 * comm_epetra.NumProc();  // 3 * 25 * comm_epetra.NumProc();
-  int ny = 3 * comm_epetra.NumProc();  // 3 * 50 * comm_epetra.NumProc();
+  GO nx = 3 * comm_tpetra->getSize();
+  GO ny = 3 * comm_tpetra->getSize();
 
-  // create a big matrix to play with
-  // note: this matrix is not really strided
-  //       however, I just need a nontrivial
-  //       matrix to play with
-  Trilinos_Util::CrsMatrixGallery FGallery("recirc_2d", comm_epetra, false);
-  FGallery.Set("nx", nx);
-  FGallery.Set("ny", ny);
-  RCP<Epetra_CrsMatrix> epetraA = rcp(FGallery.GetMatrix(), false);
-  RCP<Tpetra::CrsMatrix<ST, LO, GO, NT> > A =
-      Teko::TpetraHelpers::nonConstEpetraCrsMatrixToTpetra(epetraA, comm_tpetra);
+  RCP<crs_t> A  = buildRecirc2DMatrix(comm_tpetra, nx, ny);
   ST beforeNorm = A->getFrobeniusNorm();
 
   int width = 3;
-  Tpetra::MultiVector<ST, LO, GO, NT> x(A->getDomainMap(), width);
-  Tpetra::MultiVector<ST, LO, GO, NT> ys(A->getRangeMap(), width);
-  Tpetra::MultiVector<ST, LO, GO, NT> y(A->getRangeMap(), width);
+  mv_t x(A->getDomainMap(), width);
+  mv_t ys(A->getRangeMap(), width);
+  mv_t y(A->getRangeMap(), width);
 
   std::vector<int> vars;
   vars.push_back(2);
   vars.push_back(1);
   Teko::TpetraHelpers::StridedTpetraOperator shell(vars, A);
 
-  // test the operator against a lot of random vectors
   int numtests = 10;
   ST max       = 0.0;
   ST min       = 1.0;
   for (int i = 0; i < numtests; i++) {
-    std::vector<ST> norm(width);
-    std::vector<ST> rel(width);
     x.randomize();
 
     shell.apply(x, y);
     A->apply(x, ys);
 
-    Tpetra::MultiVector<ST, LO, GO, NT> e(y, Teuchos::Copy);
-    e.update(-1.0, ys, 1.0);
-    e.norm2(Teuchos::ArrayView<ST>(norm));
-
-    // compute relative error
-    ys.norm2(Teuchos::ArrayView<ST>(rel));
-    for (int j = 0; j < width; j++) {
-      max = max > norm[j] / rel[j] ? max : norm[j] / rel[j];
-      min = min < norm[j] / rel[j] ? min : norm[j] / rel[j];
-    }
+    ST err = relativeError(y, ys);
+    max    = std::max(max, err);
+    min    = std::min(min, err);
   }
+
   TEST_ASSERT(max >= min, "\n   tStridedTpetraOperator::test_vector_constr: "
                               << toString(status) << ": "
                               << "sanity checked - " << max << " >= " << min);
@@ -279,7 +294,7 @@ bool tStridedTpetraOperator::test_vector_constr(int verbosity, std::ostream& os)
                                      << "testing tolerance over many matrix vector multiplies ( "
                                      << max << " <= " << tolerance_ << " )");
 
-  A->scale(2.0);  // double everything
+  A->scale(2.0);
 
   ST afterNorm = A->getFrobeniusNorm();
   TEST_ASSERT(beforeNorm != afterNorm, "\n   tStridedTpetraOperator::test_vector_constr "
@@ -288,30 +303,20 @@ bool tStridedTpetraOperator::test_vector_constr(int verbosity, std::ostream& os)
 
   shell.RebuildOps();
 
-  // test the operator against a lot of random vectors
-
   numtests = 10;
   max      = 0.0;
   min      = 1.0;
   for (int i = 0; i < numtests; i++) {
-    std::vector<ST> norm(width);
-    std::vector<ST> rel(width);
     x.randomize();
 
     shell.apply(x, y);
     A->apply(x, ys);
 
-    Tpetra::MultiVector<ST, LO, GO, NT> e(y);
-    e.update(-1.0, ys, 1.0);
-    e.norm2(Teuchos::ArrayView<ST>(norm));
-
-    // compute relative error
-    ys.norm2(Teuchos::ArrayView<ST>(rel));
-    for (int j = 0; j < width; j++) {
-      max = max > norm[j] / rel[j] ? max : norm[j] / rel[j];
-      min = min < norm[j] / rel[j] ? min : norm[j] / rel[j];
-    }
+    ST err = relativeError(y, ys);
+    max    = std::max(max, err);
+    min    = std::min(min, err);
   }
+
   TEST_ASSERT(max >= min, "\n   tStridedTpetraOperator::test_vector_constr (rebuild): "
                               << toString(status) << ": "
                               << "sanity checked - " << max << " >= " << min);
@@ -327,34 +332,23 @@ bool tStridedTpetraOperator::test_reorder(int verbosity, std::ostream& os, int t
   bool status    = false;
   bool allPassed = true;
 
-  const Epetra_Comm& comm_epetra             = *GetComm();
   RCP<const Teuchos::Comm<int> > comm_tpetra = GetComm_tpetra();
 
   std::string tstr = total ? "(composite reorder)" : "(flat reorder)";
 
   TEST_MSG("\n   tStridedTpetraOperator::test_reorder" << tstr << ": "
-                                                       << "Running on " << comm_epetra.NumProc()
+                                                       << "Running on " << comm_tpetra->getSize()
                                                        << " processors");
 
-  // pick
-  int nx = 3 * comm_epetra.NumProc();  // 3 * 25 * comm_epetra.NumProc();
-  int ny = 3 * comm_epetra.NumProc();  // 3 * 50 * comm_epetra.NumProc();
+  GO nx = 3 * comm_tpetra->getSize();
+  GO ny = 3 * comm_tpetra->getSize();
 
-  // create a big matrix to play with
-  // note: this matrix is not really strided
-  //       however, I just need a nontrivial
-  //       matrix to play with
-  Trilinos_Util::CrsMatrixGallery FGallery("recirc_2d", comm_epetra, false);
-  FGallery.Set("nx", nx);
-  FGallery.Set("ny", ny);
-  RCP<Epetra_CrsMatrix> epetraA = rcp(FGallery.GetMatrix(), false);
-  RCP<Tpetra::CrsMatrix<ST, LO, GO, NT> > A =
-      Teko::TpetraHelpers::nonConstEpetraCrsMatrixToTpetra(epetraA, comm_tpetra);
+  RCP<crs_t> A = buildRecirc2DMatrix(comm_tpetra, nx, ny);
 
   int width = 3;
-  Tpetra::MultiVector<ST, LO, GO, NT> x(A->getDomainMap(), width);
-  Tpetra::MultiVector<ST, LO, GO, NT> yf(A->getRangeMap(), width);
-  Tpetra::MultiVector<ST, LO, GO, NT> yr(A->getRangeMap(), width);
+  mv_t x(A->getDomainMap(), width);
+  mv_t yf(A->getRangeMap(), width);
+  mv_t yr(A->getRangeMap(), width);
 
   Teko::TpetraHelpers::StridedTpetraOperator flatShell(3, A, "Af");
   Teko::TpetraHelpers::StridedTpetraOperator reorderShell(3, A, "Ar");
@@ -389,30 +383,20 @@ bool tStridedTpetraOperator::test_reorder(int verbosity, std::ostream& os, int t
   TEST_MSG("\n      " << Teuchos::describe(*reorderShell.getThyraOp(), Teuchos::VERB_HIGH)
                       << std::endl);
 
-  // test the operator against a lot of random vectors
   int numtests = 10;
   ST max       = 0.0;
   ST min       = 1.0;
   for (int i = 0; i < numtests; i++) {
-    std::vector<ST> norm(width);
-    std::vector<ST> rel(width);
     x.randomize();
 
     flatShell.apply(x, yf);
     reorderShell.apply(x, yr);
 
-    Tpetra::MultiVector<ST, LO, GO, NT> e(yf, Teuchos::Copy);
-    e.update(-1.0, yr, 1.0);
-    e.norm2(Teuchos::ArrayView<ST>(norm));
-
-    // compute relative error
-    yf.norm2(Teuchos::ArrayView<ST>(rel));
-
-    for (int j = 0; j < width; j++) {
-      max = max > norm[j] / rel[j] ? max : norm[j] / rel[j];
-      min = min < norm[j] / rel[j] ? min : norm[j] / rel[j];
-    }
+    ST err = relativeError(yf, yr);
+    max    = std::max(max, err);
+    min    = std::min(min, err);
   }
+
   TEST_ASSERT(max >= min, "   tStridedTpetraOperator::test_reorder"
                               << tstr << ": " << toString(status) << ": "
                               << "sanity checked - " << max << " >= " << min);
@@ -424,5 +408,4 @@ bool tStridedTpetraOperator::test_reorder(int verbosity, std::ostream& os, int t
   return allPassed;
 }
 
-}  // namespace Test
-}  // namespace Teko
+}  // namespace Teko::Test

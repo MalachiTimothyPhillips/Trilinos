@@ -232,7 +232,7 @@ bool tBlockingTpetra::test_one2many(int verbosity, std::ostream& os) {
   bool allPassed = true;
 
   GO size = 3 * 1000;
-  TEST_MSG("\n   tBlockingTpetra::test_one2many: Builing Epetra_Map and source vector");
+  TEST_MSG("\n   tBlockingTpetra::test_one2many: Builing map and source vector");
   RCP<Tpetra::Map<LO, GO, NT> > map = rcp(new Tpetra::Map<LO, GO, NT>(size, 0, GetComm_tpetra()));
   RCP<Tpetra::MultiVector<ST, LO, GO, NT> > v =
       rcp(new Tpetra::MultiVector<ST, LO, GO, NT>(map, 1));
@@ -356,7 +356,6 @@ bool tBlockingTpetra::test_buildSubBlock(int verbosity, std::ostream& os) {
   GO myElmts[2] = {2 * mypid + 0, 2 * mypid + 1};
   int grid      = -1;
 
-  // build epetra operator
   /////////////////////////////////////////
   Tpetra::Map<LO, GO, NT> map(-1, Teuchos::ArrayView<GO>(myElmts, 2), 0, GetComm_tpetra());
   std::vector<GO> indices(numProc * 2);

@@ -29,19 +29,28 @@
 #include "Teuchos_CommandLineProcessor.hpp"
 #include "Teuchos_StandardCatchMacros.hpp"
 
+// Tpetra includes
+#include "Tpetra_Core.hpp"
 #include "Tpetra_Vector.hpp"
 #include "Tpetra_CrsMatrix.hpp"
 
-// TriUtils includes
-#include "Trilinos_Util_CrsMatrixGallery.h"
+// Galeri / Xpetra
+#include "Galeri_XpetraMaps.hpp"
+#include "Galeri_XpetraProblemFactory.hpp"
+#include "Galeri_XpetraParameters.hpp"
+
+#include "Xpetra_Map.hpp"
+#include "Xpetra_Matrix.hpp"
+#include "Xpetra_TpetraMap.hpp"
+#include "Xpetra_TpetraCrsMatrix.hpp"
 
 #include "Teko_TpetraOperatorWrapper.hpp"
 #include "Teko_TpetraHelpers.hpp"
+#include "Teko_ConfigDefs.hpp"
 
 #include "tTpetraOperatorWrapper.hpp"
 
-namespace Teko {
-namespace Test {
+namespace Teko::Test {
 
 using Teuchos::null;
 using Teuchos::RCP;
@@ -54,6 +63,48 @@ using Thyra::LinearOpTester;
 using Thyra::MultiVectorBase;
 using Thyra::VectorBase;
 
+namespace {
+
+using ST = Teko::ST;
+using LO = Teko::LO;
+using GO = Teko::GO;
+using NT = Teko::NT;
+
+using map_t = Tpetra::Map<LO, GO, NT>;
+using crs_t = Tpetra::CrsMatrix<ST, LO, GO, NT>;
+using mv_t  = Tpetra::MultiVector<ST, LO, GO, NT>;
+
+RCP<crs_t> buildGaleriMatrix(const std::string& matrixType,
+                             const RCP<const Teuchos::Comm<int> >& comm, GO nx, GO ny,
+                             double diff = 1e-5, double conv = 1.0, double diagA = 1.0) {
+  Teuchos::ParameterList galeriList;
+  galeriList.set("nx", nx);
+  galeriList.set("ny", ny);
+  galeriList.set("mx", comm->getSize());
+  galeriList.set("my", 1);
+
+  if (matrixType == "Recirc2D") {
+    galeriList.set("lx", 1.0);
+    galeriList.set("ly", 1.0);
+    galeriList.set("diff", diff);
+    galeriList.set("conv", conv);
+  }
+
+  if (matrixType == "Identity" || matrixType == "Diag") {
+    galeriList.set("a", diagA);
+  }
+
+  RCP<const Xpetra::Map<LO, GO, NT> > xMap =
+      Galeri::Xpetra::CreateMap<LO, GO, NT>(Xpetra::UseTpetra, "Cartesian2D", comm, galeriList);
+  RCP<const map_t> tMap = Xpetra::toTpetra(xMap);
+
+  auto problem =
+      Galeri::Xpetra::BuildProblem<ST, LO, GO, map_t, crs_t, mv_t>(matrixType, tMap, galeriList);
+  return problem->BuildMatrix();
+}
+
+}  // namespace
+
 void tTpetraOperatorWrapper::initializeTest() {}
 
 int tTpetraOperatorWrapper::runTest(int verbosity, std::ostream& stdstrm, std::ostream& failstrm,
@@ -65,17 +116,18 @@ int tTpetraOperatorWrapper::runTest(int verbosity, std::ostream& stdstrm, std::o
   failstrm << "tTpetraOperatorWrapper";
 
   status = test_functionality(verbosity, failstrm);
-  Teko_TEST_MSG(stdstrm, 1, "   \"functionality\" ... PASSED", "   \"functionality\" ... FAILED");
+  Teko_TEST_MSG_tpetra(stdstrm, 1, "   \"functionality\" ... PASSED",
+                       "   \"functionality\" ... FAILED");
   allTests &= status;
   failcount += status ? 0 : 1;
   totalrun++;
 
   status = allTests;
   if (verbosity >= 10) {
-    Teko_TEST_MSG(failstrm, 0, "tTpetraOperatorWrapper...PASSED",
-                  "tTpetraOperatorWrapper...FAILED");
-  } else {  // Normal Operating Procedures (NOP)
-    Teko_TEST_MSG(failstrm, 0, "...PASSED", "tTpetraOperatorWrapper...FAILED");
+    Teko_TEST_MSG_tpetra(failstrm, 0, "tTpetraOperatorWrapper...PASSED",
+                         "tTpetraOperatorWrapper...FAILED");
+  } else {
+    Teko_TEST_MSG_tpetra(failstrm, 0, "...PASSED", "tTpetraOperatorWrapper...FAILED");
   }
 
   return failcount;
@@ -85,50 +137,28 @@ bool tTpetraOperatorWrapper::test_functionality(int verbosity, std::ostream& os)
   bool status    = false;
   bool allPassed = true;
 
-  const Epetra_Comm& comm_epetra             = *GetComm();
   RCP<const Teuchos::Comm<int> > comm_tpetra = GetComm_tpetra();
 
   TEST_MSG("\n   tTpetraOperatorWrapper::test_functionality: "
-           << "Running on " << comm_epetra.NumProc() << " processors");
+           << "Running on " << comm_tpetra->getSize() << " processors");
 
-  int nx = 39;  // essentially random values
-  int ny = 53;
+  GO nx = 39;
+  GO ny = 53;
 
   TEST_MSG("   tTpetraOperatorWrapper::test_functionality: "
-           << "Using Trilinos_Util to create test matrices");
+           << "Using Galeri/Xpetra to create test matrices");
 
-  // create some big blocks to play with
-  Trilinos_Util::CrsMatrixGallery FGallery("recirc_2d", comm_epetra, false);
-  FGallery.Set("nx", nx);
-  FGallery.Set("ny", ny);
-  Epetra_CrsMatrix& epetraF = FGallery.GetMatrixRef();
-  RCP<const Tpetra::CrsMatrix<ST, LO, GO, NT> > tpetraF =
-      Teko::TpetraHelpers::epetraCrsMatrixToTpetra(rcpFromRef(epetraF), comm_tpetra);
+  RCP<const crs_t> tpetraF = buildGaleriMatrix("Recirc2D", comm_tpetra, nx, ny, 1e-5, 1.0);
 
-  Trilinos_Util::CrsMatrixGallery CGallery("laplace_2d", comm_epetra, false);
-  CGallery.Set("nx", nx);
-  CGallery.Set("ny", ny);
-  Epetra_CrsMatrix& epetraC = CGallery.GetMatrixRef();
-  RCP<const Tpetra::CrsMatrix<ST, LO, GO, NT> > tpetraC =
-      Teko::TpetraHelpers::epetraCrsMatrixToTpetra(rcpFromRef(epetraC), comm_tpetra);
+  RCP<const crs_t> tpetraC = buildGaleriMatrix("Laplace2D", comm_tpetra, nx, ny);
 
-  Trilinos_Util::CrsMatrixGallery BGallery("diag", comm_epetra, false);
-  BGallery.Set("nx", nx * ny);
-  BGallery.Set("a", 5.0);
-  Epetra_CrsMatrix& epetraB = BGallery.GetMatrixRef();
-  RCP<const Tpetra::CrsMatrix<ST, LO, GO, NT> > tpetraB =
-      Teko::TpetraHelpers::epetraCrsMatrixToTpetra(rcpFromRef(epetraB), comm_tpetra);
+  RCP<const crs_t> tpetraB = buildGaleriMatrix("Identity", comm_tpetra, nx, ny, 0.0, 0.0, 5.0);
 
-  Trilinos_Util::CrsMatrixGallery BtGallery("diag", comm_epetra, false);
-  BtGallery.Set("nx", nx * ny);
-  BtGallery.Set("a", 3.0);
-  Epetra_CrsMatrix& epetraBt = BtGallery.GetMatrixRef();
-  RCP<const Tpetra::CrsMatrix<ST, LO, GO, NT> > tpetraBt =
-      Teko::TpetraHelpers::epetraCrsMatrixToTpetra(rcpFromRef(epetraBt), comm_tpetra);
+  RCP<const crs_t> tpetraBt = buildGaleriMatrix("Identity", comm_tpetra, nx, ny, 0.0, 0.0, 3.0);
 
-  // load'em up in a thyra operator
   TEST_MSG("   tTpetraOperatorWrapper::test_functionality: "
            << " Building block2x2 Thyra matrix ... wrapping in TpetraOperatorWrapper");
+
   const RCP<const LinearOpBase<double> > A = Thyra::block2x2<double>(
       Thyra::constTpetraLinearOp<ST, LO, GO, NT>(
           Thyra::tpetraVectorSpace<ST, LO, GO, NT>(tpetraF->getDomainMap()),
@@ -144,15 +174,12 @@ bool tTpetraOperatorWrapper::test_functionality(int verbosity, std::ostream& os)
           Thyra::tpetraVectorSpace<ST, LO, GO, NT>(tpetraC->getRangeMap()), tpetraC),
       "A");
 
-  // const RCP<Thyra::TpetraOperatorWrapper> epetra_A = rcp(new Thyra::TpetraOperatorWrapper(A));
   const RCP<Teko::TpetraHelpers::TpetraOperatorWrapper> tpetra_A =
       rcp(new Teko::TpetraHelpers::TpetraOperatorWrapper(A));
 
-  // begin the tests!
   const RCP<const Tpetra::Map<LO, GO, NT> >& rangeMap  = tpetra_A->getRangeMap();
   const RCP<const Tpetra::Map<LO, GO, NT> >& domainMap = tpetra_A->getDomainMap();
 
-  // check to see that the number of global elements is correct
   TEST_EQUALITY(rangeMap->getGlobalNumElements(), (Tpetra::global_size_t)2 * nx * ny,
                 "   tTpetraOperatorWrapper::test_functionality: "
                     << toString(status) << ": "
@@ -160,7 +187,6 @@ bool tTpetraOperatorWrapper::test_functionality(int verbosity, std::ostream& os)
                     << "( map = " << rangeMap->getGlobalNumElements() << ", true = " << 2 * nx * ny
                     << " )");
 
-  // check to see that the number of global elements is correct
   TEST_EQUALITY(domainMap->getGlobalNumElements(), (Tpetra::global_size_t)2 * nx * ny,
                 "   tTpetraOperatorWrapper::test_functionality: "
                     << toString(status) << ": "
@@ -168,7 +194,6 @@ bool tTpetraOperatorWrapper::test_functionality(int verbosity, std::ostream& os)
                     << "( map = " << domainMap->getGlobalNumElements() << ", true = " << 2 * nx * ny
                     << " )");
 
-  // largest global ID should be one less then the # of elements
   TEST_EQUALITY(rangeMap->getGlobalNumElements() - 1,
                 (Tpetra::global_size_t)rangeMap->getMaxAllGlobalIndex(),
                 "   tTpetraOperatorWrapper::test_functionality: "
@@ -186,40 +211,38 @@ bool tTpetraOperatorWrapper::test_functionality(int verbosity, std::ostream& os)
 
   RCP<const Teko::TpetraHelpers::MappingStrategy> ms = tpetra_A->getMapStrategy();
 
-  // create a vector to test: copyThyraIntoTpetra
-  //////////////////////////////////////////////////////////////
   {
     const RCP<MultiVectorBase<ST> > tv = Thyra::createMembers(A->domain(), 1);
     Thyra::randomize(-100.0, 100.0, tv.ptr());
-    // const Thyra::ConstVector<double> handle_tv(tv);
+
     const RCP<const MultiVectorBase<ST> > tv_0 =
         Teuchos::rcp_dynamic_cast<const Thyra::ProductMultiVectorBase<ST> >(tv)
             ->getMultiVectorBlock(0);
     const RCP<const MultiVectorBase<ST> > tv_1 =
         Teuchos::rcp_dynamic_cast<const Thyra::ProductMultiVectorBase<ST> >(tv)
             ->getMultiVectorBlock(1);
+
     const Thyra::ConstDetachedSpmdVectorView<ST> vv_0(tv_0->col(0));
     const Thyra::ConstDetachedSpmdVectorView<ST> vv_1(tv_1->col(0));
 
     LO off_0 = vv_0.globalOffset();
     LO off_1 = vv_1.globalOffset();
 
-    // create its Tpetra counter part
     const RCP<Tpetra::Vector<ST, LO, GO, NT> > ev =
         rcp(new Tpetra::Vector<ST, LO, GO, NT>(tpetra_A->getDomainMap()));
     ms->copyThyraIntoTpetra(tv, *ev);
 
-    // compare tv to ev!
     TEST_EQUALITY((Tpetra::global_size_t)tv->range()->dim(), ev->getGlobalLength(),
                   "   tTpetraOperatorWrapper::test_functionality: "
                       << toString(status) << ": "
                       << " checking ThyraIntoTpetra copy "
                       << "( thyra dim = " << tv->range()->dim()
                       << ", global length = " << ev->getGlobalLength() << " )");
-    LO numMyElements = domainMap->getLocalNumElements();
-    TEST_MSG("domainMap->getLocalNumElements() = " << domainMap->getLocalNumElements());
+
+    LO numMyElements               = domainMap->getLocalNumElements();
     bool compareThyraToTpetraValue = true;
     ST tval                        = 0.0;
+    auto evView                    = ev->get1dView();
     for (LO i = 0; i < numMyElements; i++) {
       GO gid = domainMap->getGlobalElement(i);
       if (gid - off_0 < nx * ny) {
@@ -227,22 +250,18 @@ bool tTpetraOperatorWrapper::test_functionality(int verbosity, std::ostream& os)
       } else {
         tval = vv_1[gid - off_1 - nx * ny];
       }
-      compareThyraToTpetraValue &= (ev->get1dView()[i] == tval);
+      compareThyraToTpetraValue &= (evView[i] == tval);
     }
     TEST_ASSERT(compareThyraToTpetraValue, "   tTpetraOperatorWrapper::test_functionality: "
                                                << toString(status) << ": "
                                                << " comparing Thyra to Tpetra values");
   }
 
-  // create a vector to test: copyTpetraIntoThyra
-  //////////////////////////////////////////////////////////////
   {
-    // create an Tpetra vector
     const RCP<Tpetra::Vector<ST, LO, GO, NT> > ev =
         rcp(new Tpetra::Vector<ST, LO, GO, NT>(tpetra_A->getDomainMap()));
     ev->randomize();
 
-    // create its thyra counterpart
     const RCP<MultiVectorBase<ST> > tv = Thyra::createMembers(A->domain(), 1);
     const RCP<const MultiVectorBase<ST> > tv_0 =
         Teuchos::rcp_dynamic_cast<const Thyra::ProductMultiVectorBase<ST> >(tv)
@@ -260,16 +279,17 @@ bool tTpetraOperatorWrapper::test_functionality(int verbosity, std::ostream& os)
 
     ms->copyTpetraIntoThyra(*ev, tv.ptr());
 
-    // compare handle_tv to ev!
     TEST_EQUALITY((Tpetra::global_size_t)tv->range()->dim(), ev->getGlobalLength(),
                   "   tTpetraOperatorWrapper::test_functionality: "
                       << toString(status) << ": "
                       << " checking TpetraIntoThyra copy "
                       << "( thyra dim = " << tv->range()->dim()
                       << ", global length = " << ev->getGlobalLength() << " )");
+
     LO numMyElements               = domainMap->getLocalNumElements();
     bool compareTpetraToThyraValue = true;
     ST tval                        = 0.0;
+    auto evView                    = ev->get1dView();
     for (LO i = 0; i < numMyElements; i++) {
       GO gid = domainMap->getGlobalElement(i);
       if (gid - off_0 < nx * ny) {
@@ -277,7 +297,7 @@ bool tTpetraOperatorWrapper::test_functionality(int verbosity, std::ostream& os)
       } else {
         tval = vv_1[gid - off_1 - nx * ny];
       }
-      compareTpetraToThyraValue &= (ev->get1dView()[i] == tval);
+      compareTpetraToThyraValue &= (evView[i] == tval);
     }
     TEST_ASSERT(compareTpetraToThyraValue, "   tTpetraOperatorWrapper::test_functionality: "
                                                << toString(status) << ": "
@@ -287,5 +307,4 @@ bool tTpetraOperatorWrapper::test_functionality(int verbosity, std::ostream& os)
   return allPassed;
 }
 
-}  // namespace Test
-}  // namespace Teko
+}  // namespace Teko::Test
