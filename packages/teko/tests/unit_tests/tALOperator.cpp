@@ -14,15 +14,14 @@
  */
 
 /*
- * This tests reads tOpMat.mm (Saddle point matrix),
- * tOpMp.mm (pressure mass matrix) and
- * tOpRhs.mm (right hand side we should get)
- * and test Teko_ALOperator.
+ * This test reads:
+ *   data/tOpMat.mm  (saddle point matrix),
+ *   data/tOpMp.mm   (pressure mass matrix), and
+ *   data/tOpRhs.mm  (reference result),
+ * and tests Teko::NS::ALOperator on the Tpetra stack.
  */
 
 #include "Teko_Config.h"
-
-#ifdef TEKO_HAVE_EPETRA
 
 #include <iostream>
 #include <fstream>
@@ -33,124 +32,140 @@
 // Teuchos
 #include "Teuchos_ConfigDefs.hpp"
 #include "Teuchos_UnitTestHarness.hpp"
-#include "Teuchos_GlobalMPISession.hpp"
 #include "Teuchos_RCP.hpp"
 
-// Epetra
-#ifdef HAVE_MPI
-#include "Epetra_MpiComm.h"
-#include "mpi.h"
-#else
-#include "Epetra_SerialComm.h"
-#endif
-#include "Epetra_Map.h"
-#include "Epetra_CrsMatrix.h"
-#include "Epetra_Vector.h"
-
-// EpetraExt
-#include "EpetraExt_CrsMatrixIn.h"
-#include "EpetraExt_VectorIn.h"
+// Tpetra
+#include "Tpetra_Core.hpp"
+#include "Tpetra_Map.hpp"
+#include "Tpetra_CrsMatrix.hpp"
+#include "Tpetra_Vector.hpp"
+#include "Tpetra_Import.hpp"
+#include "MatrixMarket_Tpetra.hpp"
 
 // Thyra
-#include "Thyra_EpetraLinearOp.hpp"
+#include "Thyra_TpetraLinearOp.hpp"
+#include "Thyra_TpetraThyraWrappers.hpp"
 
 // Teko
 #include "Teko_ALOperator.hpp"
+#include "Teko_ConfigDefs.hpp"
 
 using namespace Teko;
-using namespace Teko::Epetra;
 
-// int
-// main(int argc, char * argv[])
-TEUCHOS_UNIT_TEST(tALOperator, test) {
-  // Build communicator
-#ifdef HAVE_MPI
-  Epetra_MpiComm Comm(MPI_COMM_WORLD);
-#else
-  Epetra_SerialComm Comm;
-#endif
+TEUCHOS_UNIT_TEST(tALOperator, test_tpetra) {
+  Tpetra::ScopeGuard scopeGuard(Teuchos::UnitTestRepository::getCLP().argc,
+                                Teuchos::UnitTestRepository::getCLP().argv);
 
-  // Get process information
-  int myPID = Comm.MyPID();
+  using ST = Teko::ST;
+  using LO = Teko::LO;
+  using GO = Teko::GO;
+  using NT = Teko::NT;
+
+  using map_t = Tpetra::Map<LO, GO, NT>;
+  using crs_t = Tpetra::CrsMatrix<ST, LO, GO, NT>;
+  using vec_t = Tpetra::Vector<ST, LO, GO, NT>;
+
+  auto comm = Tpetra::getDefaultComm();
+
+  const int myPID = comm->getRank();
   out << "MPI_PID = " << myPID << ", UNIX_PID = " << getpid() << std::endl;
 
-  // Maps.
-  int dim = 2, numVel = 3, numPre = 2, errCode;
-  Epetra_Map mapVel(numVel, 0, Comm), mapPre(numPre, 0, Comm);
-  Epetra_Map mapAll(numVel * dim + numPre, 0, Comm);
+  // Maps
+  const int dim   = 2;
+  const GO numVel = 3;
+  const GO numPre = 2;
+  int errCode     = 0;
 
-  // Reorder.
-  std::vector<int> reorderedVec;
-  int numMyLen = mapVel.NumMyElements();
-  int *myGlb;
-  myGlb = mapVel.MyGlobalElements();
-  for (int i = 0; i < dim; i++)
-    for (int j = 0; j < numMyLen; j++) reorderedVec.push_back(myGlb[j] + numVel * i);
-  numMyLen = mapPre.NumMyElements();
-  myGlb    = mapPre.MyGlobalElements();
-  for (int j = 0; j < numMyLen; j++) reorderedVec.push_back(myGlb[j] + numVel * dim);
+  RCP<const map_t> mapVel = Teuchos::rcp(new map_t(numVel, 0, comm));
+  RCP<const map_t> mapPre = Teuchos::rcp(new map_t(numPre, 0, comm));
+  RCP<const map_t> mapAll = Teuchos::rcp(new map_t(numVel * dim + numPre, 0, comm));
 
-  Teuchos::RCP<Epetra_Map> mapReorder =
-      Teuchos::rcp(new Epetra_Map(-1, reorderedVec.size(), &reorderedVec[0], 0, Comm));
-  Teuchos::RCP<Epetra_Import> importReorder = Teuchos::rcp(new Epetra_Import(*mapReorder, mapAll));
+  // Build reordered global IDs
+  std::vector<GO> reorderedVec;
+  const auto invalidLO = Teuchos::OrdinalTraits<LO>::invalid();
 
-  std::vector<std::vector<int> > blockedVec;
-  numMyLen = mapVel.NumMyElements();
-  myGlb    = mapVel.MyGlobalElements();
-  for (int i = 0; i < dim; i++) {
-    reorderedVec.clear();
-    for (int j = 0; j < numMyLen; j++) reorderedVec.push_back(myGlb[j] + numVel * i);
-    blockedVec.push_back(reorderedVec);
+  for (LO lid = 0; lid < static_cast<LO>(mapVel->getLocalNumElements()); ++lid) {
+    GO gid0 = mapVel->getGlobalElement(lid);
+    for (int i = 0; i < dim; i++) {
+      reorderedVec.push_back(gid0 + numVel * i);
+    }
   }
-  numMyLen = mapPre.NumMyElements();
-  myGlb    = mapPre.MyGlobalElements();
-  reorderedVec.clear();
-  for (int j = 0; j < numMyLen; j++) reorderedVec.push_back(myGlb[j] + numVel * dim);
-  blockedVec.push_back(reorderedVec);
 
-  // Read matrices and vector.
-  Epetra_CrsMatrix *ptrMat = 0, *ptrMp = 0;
-  TEUCHOS_ASSERT(EpetraExt::MatrixMarketFileToCrsMatrix("data/tOpMat.mm", mapAll, ptrMat) == 0);
-  TEUCHOS_ASSERT(EpetraExt::MatrixMarketFileToCrsMatrix("data/tOpMp.mm", mapPre, ptrMp) == 0);
-  LinearOp lpMp = Thyra::epetraLinearOp(Teuchos::rcpFromRef(*ptrMp));
-  // This vector is computed by Matlab for comparison.
-  Epetra_Vector *ptrExact = 0;
-  TEUCHOS_ASSERT(EpetraExt::MatrixMarketFileToVector("data/tOpRhs.mm", mapAll, ptrExact) == 0);
+  for (LO lid = 0; lid < static_cast<LO>(mapPre->getLocalNumElements()); ++lid) {
+    GO gid = mapPre->getGlobalElement(lid);
+    reorderedVec.push_back(gid + numVel * dim);
+  }
 
-  // Reorder matrix.
-  RCP<Epetra_CrsMatrix> mat =
-      Teuchos::rcp(new Epetra_CrsMatrix(Copy, *mapReorder, ptrMat->GlobalMaxNumEntries()));
-  errCode = mat->Import(*ptrMat, *importReorder, Insert);
-  errCode = mat->FillComplete();
+  RCP<const map_t> mapReorder =
+      Teuchos::rcp(new map_t(Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid(),
+                             Teuchos::ArrayView<const GO>(reorderedVec), 0, comm));
 
-  // Build augmented Lagrangian-based operator.
+  RCP<Tpetra::Import<LO, GO, NT> > importReorder =
+      Teuchos::rcp(new Tpetra::Import<LO, GO, NT>(mapAll, mapReorder));
+
+  // Build blocked vector of GIDs
+  std::vector<std::vector<GO> > blockedVec;
+  for (int i = 0; i < dim; i++) {
+    std::vector<GO> blk;
+    for (LO lid = 0; lid < static_cast<LO>(mapVel->getLocalNumElements()); ++lid) {
+      GO gid = mapVel->getGlobalElement(lid);
+      blk.push_back(gid + numVel * i);
+    }
+    blockedVec.push_back(blk);
+  }
+  {
+    std::vector<GO> blk;
+    for (LO lid = 0; lid < static_cast<LO>(mapPre->getLocalNumElements()); ++lid) {
+      GO gid = mapPre->getGlobalElement(lid);
+      blk.push_back(gid + numVel * dim);
+    }
+    blockedVec.push_back(blk);
+  }
+
+  // Read matrices and vector
+  RCP<crs_t> ptrMat = Tpetra::MatrixMarket::Reader<crs_t>::readSparseFile("data/tOpMat.mm", comm);
+  TEST_ASSERT(!ptrMat.is_null());
+
+  RCP<crs_t> ptrMp = Tpetra::MatrixMarket::Reader<crs_t>::readSparseFile("data/tOpMp.mm", comm);
+  TEST_ASSERT(!ptrMp.is_null());
+
+  LinearOp lpMp = Thyra::tpetraLinearOp<ST, LO, GO, NT>(
+      Thyra::tpetraVectorSpace<ST, LO, GO, NT>(ptrMp->getRangeMap()),
+      Thyra::tpetraVectorSpace<ST, LO, GO, NT>(ptrMp->getDomainMap()), ptrMp);
+
+  RCP<const map_t> mapAllL = mapAll;
+  RCP<vec_t> ptrExact = Tpetra::MatrixMarket::Reader<crs_t>::readVectorFile("data/tOpRhs.mm", comm,
+                                                                            mapAllL, false, false);
+  TEST_ASSERT(!ptrExact.is_null());
+
+  // Reorder matrix
+  RCP<crs_t> mat = Teuchos::rcp(new crs_t(mapReorder, ptrMat->getGlobalMaxNumRowEntries()));
+  mat->doImport(*ptrMat, *importReorder, Tpetra::INSERT);
+  mat->fillComplete();
+
+  // Build augmented Lagrangian operator
   Teko::NS::ALOperator al(blockedVec, mat, lpMp);
 
-  // Initialize vectors.
-  Epetra_Vector x(*mapReorder, false), b(*mapReorder, false);
-  x.PutScalar(1.0);
-  b.PutScalar(0.0);
+  // Initialize vectors
+  vec_t x(mapReorder);
+  vec_t b(mapReorder);
+  x.putScalar(1.0);
+  b.putScalar(0.0);
 
-  // Apply operator.
-  al.Apply(x, b);
+  // Apply operator
+  al.apply(x, b);
 
-  // Compare computed vector and exact vector.
-  b.Update(-1.0, *ptrExact, 1.0);
-  double norm2;
-  b.Norm2(&norm2);
+  // Compare computed vector and exact vector
+  b.update(-1.0, *ptrExact, 1.0);
+  ST norm2 = b.norm2();
+
   if (norm2 < 1.0e-15) {
-    out << "Test:ALOperator: Passed." << std::endl;
+    out << "Test:ALOperator(Tpetra): Passed." << std::endl;
     errCode = 0;
   } else {
-    out << "Test:ALOperator: Failed." << std::endl;
+    out << "Test:ALOperator(Tpetra): Failed. norm2 = " << norm2 << std::endl;
     errCode = -1;
   }
 
-  delete ptrMat;
-  delete ptrMp;
-  delete ptrExact;
-
   TEST_ASSERT(errCode == 0);
 }
-
-#endif  // TEKO_HAVE_EPETRA
