@@ -1,6 +1,5 @@
 
 TRIBITS_INCLUDE_DIRECTORIES(REQUIRED_DURING_INSTALLATION_TESTING ${CMAKE_CURRENT_SOURCE_DIR})
-TRIBITS_INCLUDE_DIRECTORIES(REQUIRED_DURING_INSTALLATION_TESTING ${CMAKE_CURRENT_SOURCE_DIR}/src/Epetra)
 TRIBITS_INCLUDE_DIRECTORIES(REQUIRED_DURING_INSTALLATION_TESTING ${CMAKE_CURRENT_SOURCE_DIR}/src/Tpetra)
 
 SET(HEADERS "")
@@ -15,33 +14,6 @@ APPEND_GLOB( SOURCES
   ${CMAKE_CURRENT_SOURCE_DIR}/src/Tpetra/*.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp
 )
-
-IF(TEKO_HAVE_EPETRA)
-  APPEND_GLOB(HEADERS ./src/Epetra/*.hpp)
-  APPEND_GLOB(SOURCES ./src/Epetra/*.cpp)
-ELSE()
-  LIST(REMOVE_ITEM SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/tLU2x2PreconditionerFactory.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/tLSCStablePreconditionerFactory.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/tAbsRowSum.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/tLSCHIntegrationTest.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/tJacobi2x2PreconditionerFactory.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/tPCDStrategy.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/tLSCIntegrationTest.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/tBlockJacobiPreconditionerFactory.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/LSCIntegrationTest.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/tLSCStabilized.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/tNeumannSeries.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/tParallelInverse.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/tSIMPLEPreconditionerFactory.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/tLumping.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/tBlockLowerTriInverseOp.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/tExplicitOps.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/tGraphLaplacian.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/tBlockUpperTriInverseOp.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/tDiagonalPreconditionerFactory.cpp
-  )
-ENDIF()
 
 SET(UNIT_TEST_DRIVER
   "${PACKAGE_SOURCE_DIR}/tests/Teko_UnitTestMain.cpp")
@@ -62,37 +34,6 @@ ELSE()
   SET(SERIAL_ARGS_STRING "")
   SET(PARALLEL_ARGS_STRING "")
   SET(CUSTOM_MPI_PROCS "4")
-ENDIF()
-
-IF(TEKO_HAVE_EPETRA)
-  TRIBITS_ADD_EXECUTABLE(
-    testdriver
-    SOURCES
-        ${HEADERS}
-        ${SOURCES}
-        ./Test_Utils.cpp
-        ./Test_Utils.hpp
-        ./testdriver.cpp
-    COMM mpi serial
-    )
-
-  TRIBITS_ADD_TEST(
-    testdriver
-    ARGS ${PARALLEL_ARGS_STRING}
-    NUM_MPI_PROCS ${CUSTOM_MPI_PROCS}
-    FAIL_REGULAR_EXPRESSION "Teko tests failed"
-    )
-
-  TRIBITS_ADD_TEST(
-    testdriver
-    ARGS ${SERIAL_ARGS_STRING}
-    NUM_MPI_PROCS 1
-    FAIL_REGULAR_EXPRESSION "Teko tests failed"
-    )
-
-  IF (${PACKAGE_NAME}_DISABLE_LSCSTABALIZED_TPETRA_ALPAH_INV_D)
-    SET(testdriver_TARGET_DEFINES -DTEKO_DISABLE_LSCSTABALIZED_TPETRA_ALPAH_INV_D)
-  ENDIF()
 ENDIF()
 
 TRIBITS_ADD_EXECUTABLE(
