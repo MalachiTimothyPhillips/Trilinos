@@ -13,8 +13,6 @@
 // Thyra includes
 #include "Thyra_LinearOpBase.hpp"
 
-#include "Epetra_SerialComm.h"
-
 #include <string>
 
 #include "Test_Utils.hpp"
