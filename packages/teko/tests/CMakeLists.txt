@@ -42,7 +42,6 @@ ELSE()
     ${CMAKE_CURRENT_SOURCE_DIR}/src/tDiagonalPreconditionerFactory.cpp
 
     ${CMAKE_CURRENT_SOURCE_DIR}/src/tBlockJacobiPreconditionerFactory_tpetra.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/tDiagonalPreconditionerFactory_tpetra.cpp
   )
 ENDIF()
 
