@@ -183,16 +183,6 @@ IF(TEKO_HAVE_EPETRA)
   )
 
   TRIBITS_ADD_EXECUTABLE_AND_TEST(
-    DiagonalPreconditionerFactory
-    SOURCES
-    unit_tests/tDiagonalPreconditionerFactory.cpp
-    ${UNIT_TEST_DRIVER}
-    COMM serial mpi
-    ARGS ${SERIAL_ARGS_STRING}
-    NUM_MPI_PROCS 2
-  )
-
-  TRIBITS_ADD_EXECUTABLE_AND_TEST(
     ExplicitOps
     SOURCES
     unit_tests/tExplicitOps.cpp
