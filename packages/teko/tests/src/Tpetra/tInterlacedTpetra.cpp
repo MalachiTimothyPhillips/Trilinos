@@ -188,7 +188,7 @@ bool tInterlacedTpetra::test_buildSubMaps_num(int verbosity, std::ostream& os) {
                 "\n   tInterlacedTpetra::test_buildSubMaps_num: "
                     << toString(status)
                     << ": "
-                       "buildSubMaps(int,vector<pair<int,RCP<Epetra_Map> > >) threw an unexpected "
+                       "buildSubMaps(int,vector<pair<int,RCP<Tpetra_Map> > >) threw an unexpected "
                        "exception");
   }
 
@@ -293,7 +293,7 @@ bool tInterlacedTpetra::test_buildSubMaps_vec(int verbosity, std::ostream& os) {
                 "\n   tInterlacedTpetra::test_buildSubMaps_vec: "
                     << toString(status)
                     << ": "
-                       "buildSubMaps(int,vector<pair<int,RCP<Epetra_Map> > >) threw an unexpected "
+                       "buildSubMaps(int,vector<pair<int,RCP<Tpetra_Map> > >) threw an unexpected "
                        "exception");
   }
 
@@ -410,7 +410,7 @@ bool tInterlacedTpetra::test_one2many(int verbosity, std::ostream& os) {
   bool allPassed = true;
 
   GO size = 3 * 1000;
-  TEST_MSG("\n   tInterlacedTpetra::test_one2many: Builing Epetra_Map and source vector");
+  TEST_MSG("\n   tInterlacedTpetra::test_one2many: Builing Tpetra_Map and source vector");
   RCP<Tpetra::Map<LO, GO, NT> > map = rcp(new Tpetra::Map<LO, GO, NT>(size, 0, GetComm_tpetra()));
   RCP<Tpetra::MultiVector<ST, LO, GO, NT> > v =
       rcp(new Tpetra::MultiVector<ST, LO, GO, NT>(map, 1));
