@@ -57,7 +57,7 @@ void tParallelInverse_tpetra::loadStridedMatrix() {
   vec[0] = 1;
   vec[1] = 2;
 
-  // Block the linear system using a strided epetra operator
+  // Block the linear system using a strided tpetra operator
   Teko::TpetraHelpers::StridedTpetraOperator sA(vec, ptrA);
 
   // get 0,0 block
