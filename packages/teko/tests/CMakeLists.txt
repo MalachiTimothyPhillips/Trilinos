@@ -92,14 +92,12 @@ TRIBITS_COPY_FILES_TO_BINARY_DIR(testdriver_tpetra_copyfiles
   EXEDEPS testdriver_tpetra
   )
 
-IF(TEKO_HAVE_EPETRA)
-  TRIBITS_COPY_FILES_TO_BINARY_DIR(testdriver_copyfiles
-    SOURCE_FILES ${TEST_DRIVER_DATA_FILES}
-    SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/data"
-    DEST_DIR "${CMAKE_CURRENT_BINARY_DIR}/data"
-    EXEDEPS testdriver
-  )
-ENDIF()
+TRIBITS_COPY_FILES_TO_BINARY_DIR(testdriver_copyfiles
+  SOURCE_FILES ${TEST_DRIVER_DATA_FILES}
+  SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/data"
+  DEST_DIR "${CMAKE_CURRENT_BINARY_DIR}/data"
+  EXEDEPS testdriver
+)
 
 TRIBITS_ADD_EXECUTABLE_AND_TEST(
   IterativePreconditionerFactory_test
@@ -204,17 +202,15 @@ TRIBITS_ADD_EXECUTABLE_AND_TEST(
   NUM_MPI_PROCS 1
   )
 
-IF(TEKO_HAVE_EPETRA)
-  TRIBITS_ADD_EXECUTABLE_AND_TEST(
-    ModALPreconditioner
-    SOURCES
-      unit_tests/tModALPreconditioner.cpp
-      ${UNIT_TEST_DRIVER}
-    COMM serial mpi
-    ARGS ${SERIAL_ARGS_STRING}
-    NUM_MPI_PROCS 1
-    )
-ENDIF()
+TRIBITS_ADD_EXECUTABLE_AND_TEST(
+  ModALPreconditioner
+  SOURCES
+    unit_tests/tModALPreconditioner.cpp
+    ${UNIT_TEST_DRIVER}
+  COMM serial mpi
+  ARGS ${SERIAL_ARGS_STRING}
+  NUM_MPI_PROCS 1
+  )
 
 TRIBITS_ADD_EXECUTABLE_AND_TEST(
   ReorderBlocking
