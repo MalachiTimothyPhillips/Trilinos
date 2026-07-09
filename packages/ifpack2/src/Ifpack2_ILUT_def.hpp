@@ -169,7 +169,7 @@ ILUT<MatrixType>::ILUT(const Teuchos::RCP<const row_matrix_type>& A)
   , RelaxValue_(Teuchos::ScalarTraits<magnitude_type>::zero())
   , LevelOfFill_(1.0)
   , DropTolerance_(ilutDefaultDropTolerance<scalar_type>())
-  , par_ilut_options_{1, 0., -1, -1, 0.75, false}
+  , par_ilut_options_{1, 0., -1, -1, 0.75, false, false}
   , InitializeTime_(0.0)
   , ComputeTime_(0.0)
   , ApplyTime_(0.0)
@@ -275,6 +275,7 @@ void ILUT<MatrixType>::setParameters(const Teuchos::ParameterList& params) {
   int par_ilut_vector_size                         = 0;
   float par_ilut_fill_in_limit                     = 0.75;
   bool par_ilut_verbose                            = false;
+  bool par_ilut_reuse_sparsity                     = false;
   if (this->useKokkosKernelsParILUT_) {
     par_ilut_max_iter                 = par_ilut_options_.max_iter;
     par_ilut_residual_norm_delta_stop = par_ilut_options_.residual_norm_delta_stop;
@@ -282,6 +283,7 @@ void ILUT<MatrixType>::setParameters(const Teuchos::ParameterList& params) {
     par_ilut_vector_size              = par_ilut_options_.vector_size;
     par_ilut_fill_in_limit            = par_ilut_options_.fill_in_limit;
     par_ilut_verbose                  = par_ilut_options_.verbose;
+    par_ilut_reuse_sparsity           = par_ilut_options_.reuse_sparsity;
 
     std::string par_ilut_plist_name("parallel ILUT options");
     if (params.isSublist(par_ilut_plist_name)) {
@@ -305,6 +307,9 @@ void ILUT<MatrixType>::setParameters(const Teuchos::ParameterList& params) {
       paramName = "verbose";
       getParamTryingTypes<bool, bool>(par_ilut_verbose, par_ilut_plist, paramName, prefix);
 
+      paramName = "reuse sparsity";
+      getParamTryingTypes<bool, bool>(par_ilut_reuse_sparsity, par_ilut_plist, paramName, prefix);
+
     }  // if (params.isSublist(par_ilut_plist_name))
 
     par_ilut_options_.max_iter                 = par_ilut_max_iter;
@@ -313,6 +318,7 @@ void ILUT<MatrixType>::setParameters(const Teuchos::ParameterList& params) {
     par_ilut_options_.vector_size              = par_ilut_vector_size;
     par_ilut_options_.fill_in_limit            = par_ilut_fill_in_limit;
     par_ilut_options_.verbose                  = par_ilut_verbose;
+    par_ilut_options_.reuse_sparsity           = par_ilut_reuse_sparsity;
 
   }  // if (this->useKokkosKernelsParILUT_)
 
@@ -539,6 +545,7 @@ void ILUT<MatrixType>::initialize() {
       par_ilut_handle->set_fill_in_limit(par_ilut_options_.fill_in_limit);
       par_ilut_handle->set_verbose(par_ilut_options_.verbose);
       par_ilut_handle->set_async_update(false);
+      par_ilut_handle->set_reuse_numeric_pattern(par_ilut_options_.reuse_sparsity);
 
       {
         Kokkos::Profiling::ScopedRegion region("Ifpack2::ILUT::initialize::par_ilut::get_or_build_A_local_crs");

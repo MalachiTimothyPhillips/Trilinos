@@ -444,6 +444,7 @@ class ILUT : virtual public Ifpack2::Preconditioner<typename MatrixType::scalar_
     int vector_size;
     double fill_in_limit;  // Note: par_ilut declares this as float
     bool verbose;
+    bool reuse_sparsity;
   } par_ilut_options_;
 
   //@}
