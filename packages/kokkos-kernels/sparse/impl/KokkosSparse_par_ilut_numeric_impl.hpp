@@ -15,8 +15,12 @@
 #include <KokkosSparse_Utils.hpp>
 #include <KokkosSparse_SortCrs.hpp>
 #include <KokkosKernels_Utils.hpp>
+#include <KokkosKernels_SimpleUtils.hpp>
 
+#include <algorithm>
 #include <limits>
+
+#include <cstdint>
 
 namespace KokkosSparse {
 namespace Impl {
@@ -35,6 +39,7 @@ struct IlutWrap {
   using HandleDeviceEntriesType = typename IlutHandle::nnz_lno_view_t;
   using HandleDeviceRowMapType  = typename IlutHandle::nnz_row_view_t;
   using HandleDeviceValueType   = typename IlutHandle::nnz_value_view_t;
+  using HandleDeviceFloatType   = typename IlutHandle::nnz_float_view_t;
   using karith                  = typename KokkosKernels::ArithTraits<scalar_t>;
   using policy_type             = typename IlutHandle::TeamPolicy;
   using member_type             = typename policy_type::member_type;
@@ -107,6 +112,69 @@ struct IlutWrap {
 
     // Need to ensure output is sorted
     sort_crs_matrix<execution_space>(t_row_map, t_entries, t_values);
+  }
+
+
+  /**
+   * Build the sorted CRS pattern of U^T and a permutation mapping each entry of U
+   * to its corresponding value position in U^T.
+   *
+   * If U_values are updated without changing the U pattern, Ut_values can be
+   * refreshed by:
+   *
+   *   Ut_values(U_to_Ut_perm(u_nnz)) = U_values(u_nnz)
+   *
+   * This is particularly useful in the reuse_numeric_pattern path, where the
+   * U pattern is fixed for all iterations.
+   */
+  template <class URowMapType, class UEntriesType, class UtRowMapType, class UtEntriesType, class PermType>
+  static void transpose_pattern_with_perm(IlutHandle& ih, const URowMapType& U_row_map,
+                                          const UEntriesType& U_entries, UtRowMapType& Ut_row_map,
+                                          UtEntriesType& Ut_entries, PermType& U_to_Ut_perm) {
+    const size_type nrows = ih.get_nrows();
+    const size_type nnz   = U_entries.extent(0);
+
+    Kokkos::deep_copy(Ut_row_map, 0);
+    Kokkos::realloc(Kokkos::WithoutInitializing, Ut_entries, nnz);
+    Kokkos::realloc(Kokkos::WithoutInitializing, U_to_Ut_perm, nnz);
+
+    HandleDeviceRowMapType U_pos("par_ilut_U_pos", nnz);
+    HandleDeviceRowMapType Ut_pos("par_ilut_Ut_pos", nnz);
+
+    Kokkos::parallel_for(
+        "par_ilut init transpose positions", range_policy(0, nnz),
+        KOKKOS_LAMBDA(const size_type i) { U_pos(i) = i; });
+
+    KokkosSparse::Impl::transpose_matrix<URowMapType, UEntriesType, HandleDeviceRowMapType, UtRowMapType,
+                                         UtEntriesType, HandleDeviceRowMapType, UtRowMapType, execution_space>(
+        nrows, nrows, U_row_map, U_entries, U_pos, Ut_row_map, Ut_entries, Ut_pos);
+
+    // Sort Ut rows and carry along the original U-position payload.
+    sort_crs_matrix<execution_space>(Ut_row_map, Ut_entries, Ut_pos);
+
+    Kokkos::parallel_for(
+        "par_ilut invert transpose permutation", range_policy(0, nnz),
+        KOKKOS_LAMBDA(const size_type t_nnz) {
+          const size_type u_nnz = Ut_pos(t_nnz);
+          U_to_Ut_perm(u_nnz)   = t_nnz;
+        });
+  }
+
+  /**
+   * Refresh Ut_values from U_values using a previously built U-to-Ut
+   * permutation. This avoids recomputing the transpose structure when U's
+   * sparsity pattern is unchanged.
+   */
+  template <class UValuesType, class PermType, class UtValuesType>
+  static void update_transpose_values(const UValuesType& U_values, const PermType& U_to_Ut_perm,
+                                      UtValuesType& Ut_values) {
+    const size_type nnz = U_values.extent(0);
+
+    Kokkos::realloc(Kokkos::WithoutInitializing, Ut_values, nnz);
+
+    Kokkos::parallel_for(
+        "par_ilut update transpose values", range_policy(0, nnz),
+        KOKKOS_LAMBDA(const size_type u_nnz) { Ut_values(U_to_Ut_perm(u_nnz)) = U_values(u_nnz); });
   }
 
   /**
@@ -336,6 +404,12 @@ struct IlutWrap {
     return first;
   }
 
+  template <class ARowMapType, class AEntriesType>
+  static Kokkos::pair<uint32_t, uint32_t> compute_structure_signature(const ARowMapType& A_row_map,
+                                                                      const AEntriesType& A_entries) {
+    return Kokkos::make_pair(KokkosKernels::Impl::hashView(A_row_map), KokkosKernels::Impl::hashView(A_entries));
+  }
+
   /**
    * The compute_sum component of compute_l_u_factors
    */
@@ -462,45 +536,152 @@ struct IlutWrap {
     }
   }
 
-  struct AbsComparator {
-    KOKKOS_INLINE_FUNCTION
-    bool operator()(const scalar_t& a, const scalar_t& b) const { return karith::abs(a) < karith::abs(b); }
-  };
-
   /**
-   * Select threshold based on filter rank. Do all this on host
+   * Select threshold based on filter rank.
    */
-  template <class ValuesType, class ValuesCopyHostType, class ValuesCopyType>
+  template <class ValuesType, class ValuesFloatType>
   static float_t threshold_select(const ValuesType& values, const typename IlutHandle::nnz_lno_t rank,
-                                  ValuesCopyHostType& values_copy, ValuesCopyType& values_copy_d) {
+                                  ValuesFloatType& values_f) {
     const index_t size = values.extent(0);
 
-    // Legacy views do not support sort, so we have to do it on host
-#ifdef KOKKOS_ENABLE_IMPL_VIEW_LEGACY
-    if constexpr (true) {
-#else
-    if constexpr (std::is_same_v<Kokkos::HostSpace, typename ValuesType::memory_space>) {
-#endif
-      Kokkos::realloc(Kokkos::WithoutInitializing, values_copy, size);
-      Kokkos::deep_copy(values_copy, values);
+    // Fill values_f with abs values so that we don't need a custom
+    // comparator for Kokkos::sort (custom compares can cause thrust problems for
+    // large views).
+    Kokkos::realloc(Kokkos::WithoutInitializing, values_f, size);
+    Kokkos::parallel_for(
+        range_policy(0, size), KOKKOS_LAMBDA(const size_type i) { values_f(i) = karith::abs(values(i)); });
 
-      auto begin  = values_copy.data();
+    if constexpr (std::is_same_v<Kokkos::HostSpace, typename ValuesType::memory_space>) {
+      // On host, the nth_element approach performs much better than Kokkos::sort. At
+      // least, this was true before the recent refactor that eliminated the need for
+      // a custom comparator.
+      auto begin  = values_f.data();
       auto target = begin + rank;
       auto end    = begin + size;
-      std::nth_element(begin, target, end, [](scalar_t a, scalar_t b) { return karith::abs(a) < karith::abs(b); });
-      return karith::abs(values_copy(rank));
+      std::nth_element(begin, target, end);
+
+      return values_f(rank);
     } else {
-      Kokkos::realloc(Kokkos::WithoutInitializing, values_copy_d, size);
-      Kokkos::deep_copy(values_copy_d, values);
+      Kokkos::sort(values_f);
 
       float_t result;
-      Kokkos::sort(values_copy_d, AbsComparator{});
       Kokkos::parallel_reduce(
-          range_policy(0, 1), KOKKOS_LAMBDA(const int, float_t& lsum) { lsum = karith::abs(values_copy_d(rank)); },
-          result);
+          range_policy(0, 1), KOKKOS_LAMBDA(const size_type, float_t& lsum) { lsum = values_f(rank); }, result);
 
       return result;
     }
+  }
+
+
+  /**
+   * Approximate threshold selection using uniform buckets.
+   *
+   * This is an opt-in alternative to the exact threshold_select implementation.
+   * It approximates the rank-th order statistic of abs(values) by:
+   *
+   *   1. computing min/max absolute value,
+   *   2. classifying values into uniformly spaced buckets,
+   *   3. finding the bucket containing the desired rank,
+   *   4. returning the lower bound of that bucket.
+   *
+   * Returning the lower bucket bound tends to be conservative with respect to
+   * dropping: it may keep more entries than the exact rank threshold, but should
+   * avoid dropping too aggressively.
+   */
+  template <class ValuesType, class BucketCountsType>
+  static float_t threshold_select_approx_bucket(IlutHandle& ih, const ValuesType& values,
+                                                const typename IlutHandle::nnz_lno_t rank,
+                                                BucketCountsType& bucket_counts) {
+    const index_t size = values.extent(0);
+
+    if (size <= 0) {
+      return float_t(0);
+    }
+
+    const index_t clamped_rank =
+        std::min(std::max(static_cast<index_t>(0), rank), static_cast<index_t>(size - 1));
+
+    float_t min_abs;
+    Kokkos::parallel_reduce(
+        "threshold_select_approx min", range_policy(0, static_cast<size_type>(size)),
+        KOKKOS_LAMBDA(const size_type i, float_t& lmin) {
+          const float_t v = karith::abs(values(i));
+          if (v < lmin) {
+            lmin = v;
+          }
+        },
+        Kokkos::Min<float_t>(min_abs));
+
+    float_t max_abs;
+    Kokkos::parallel_reduce(
+        "threshold_select_approx max", range_policy(0, static_cast<size_type>(size)),
+        KOKKOS_LAMBDA(const size_type i, float_t& lmax) {
+          const float_t v = karith::abs(values(i));
+          if (v > lmax) {
+            lmax = v;
+          }
+        },
+        Kokkos::Max<float_t>(max_abs));
+
+    // If all magnitudes are equal, the exact and approximate thresholds are the same.
+    if (min_abs == max_abs) {
+      return min_abs;
+    }
+
+    const int requested_num_buckets = ih.get_threshold_select_num_buckets();
+    const size_type num_buckets =
+        static_cast<size_type>(requested_num_buckets > 0 ? requested_num_buckets : 1);
+
+    Kokkos::realloc(Kokkos::WithoutInitializing, bucket_counts, num_buckets);
+    Kokkos::deep_copy(bucket_counts, size_type(0));
+
+    const float_t range      = max_abs - min_abs;
+    const float_t inv_width  = static_cast<float_t>(num_buckets) / range;
+    const size_type last_bin = num_buckets - 1;
+
+    Kokkos::parallel_for(
+        "threshold_select_approx classify", range_policy(0, static_cast<size_type>(size)),
+        KOKKOS_LAMBDA(const size_type i) {
+          const float_t v = karith::abs(values(i));
+
+          size_type bucket = static_cast<size_type>((v - min_abs) * inv_width);
+          if (bucket > last_bin) {
+            bucket = last_bin;
+          }
+
+          Kokkos::atomic_add(&bucket_counts(bucket), size_type(1));
+        });
+
+    auto bucket_counts_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), bucket_counts);
+
+    size_type cumulative      = 0;
+    size_type selected_bucket = last_bin;
+    const size_type target_rank = static_cast<size_type>(clamped_rank);
+
+    for (size_type b = 0; b < num_buckets; ++b) {
+      const size_type count = bucket_counts_h(b);
+      if (target_rank < cumulative + count) {
+        selected_bucket = b;
+        break;
+      }
+      cumulative += count;
+    }
+
+    const float_t width = range / static_cast<float_t>(num_buckets);
+
+    return min_abs + static_cast<float_t>(selected_bucket) * width;
+  }
+
+  template <class ValuesType, class ValuesFloatType, class BucketCountsType>
+  static float_t threshold_select_dispatch(IlutHandle& ih, const ValuesType& values,
+                                           const typename IlutHandle::nnz_lno_t rank, ValuesFloatType& values_f,
+                                           BucketCountsType& bucket_counts) {
+    if (ih.get_threshold_select_algorithm() ==
+        KokkosSparse::Experimental::PAR_ILUT_THRESHOLD_SELECT_APPROX_BUCKET) {
+      return threshold_select_approx_bucket(ih, values, rank, bucket_counts);
+    }
+
+    return threshold_select(values, rank, values_f);
   }
 
   template <class IRowMapType, class IEntriesType, class IValuesType, class ORowMapType>
@@ -578,6 +759,57 @@ struct IlutWrap {
     OValuesType O_values;
   };
 
+
+  template <class IRowMapType, class IEntriesType, class IValuesType, class ORowMapType, class OEntriesType,
+            class OValuesType>
+  struct ThresholdFilterAssignTeamFunctor {
+    ThresholdFilterAssignTeamFunctor(const float_t threshold_, const IRowMapType& I_row_map_,
+                                     const IEntriesType& I_entries_, const IValuesType& I_values_,
+                                     const ORowMapType& O_row_map_, const OEntriesType& O_entries_,
+                                     const OValuesType& O_values_)
+        : threshold(threshold_),
+          I_row_map(I_row_map_),
+          I_entries(I_entries_),
+          I_values(I_values_),
+          O_row_map(O_row_map_),
+          O_entries(O_entries_),
+          O_values(O_values_) {}
+
+    KOKKOS_INLINE_FUNCTION void operator()(const member_type& team) const {
+      const auto row_idx = team.league_rank();
+
+      const auto i_row_nnz_begin = I_row_map(row_idx);
+      const auto i_row_nnz_end   = I_row_map(row_idx + 1);
+      const auto o_row_nnz_begin = O_row_map(row_idx);
+
+      Kokkos::parallel_scan(
+          Kokkos::TeamThreadRange(team, i_row_nnz_begin, i_row_nnz_end),
+          [&](const size_type innz, size_type& update, const bool final) {
+            const auto col_idx = I_entries(innz);
+
+            const bool keep =
+                karith::abs(I_values(innz)) >= threshold || static_cast<size_type>(col_idx) == row_idx;
+
+            const size_type local_pos = update;
+            update += keep ? size_type(1) : size_type(0);
+
+            if (final && keep) {
+              const size_type onnz = o_row_nnz_begin + local_pos;
+              O_entries(onnz)     = col_idx;
+              O_values(onnz)      = I_values(innz);
+            }
+          });
+    }
+
+    float_t threshold;
+    IRowMapType I_row_map;
+    IEntriesType I_entries;
+    IValuesType I_values;
+    ORowMapType O_row_map;
+    OEntriesType O_entries;
+    OValuesType O_values;
+  };
+
   /**
    * Remove non-diagnal elements that are below the threshold.
    */
@@ -599,9 +831,43 @@ struct IlutWrap {
     Kokkos::realloc(Kokkos::WithoutInitializing, O_values, new_nnz);
 
     Kokkos::parallel_for(
-        "threshold_filter assign", range_policy(0, nrows),
-        ThresholdFilterAssignFunctor<IRowMapType, IEntriesType, IValuesType, ORowMapType, OEntriesType, OValuesType>(
-            threshold, I_row_map, I_entries, I_values, O_row_map, O_entries, O_values));
+        "threshold_filter assign team", policy,
+        ThresholdFilterAssignTeamFunctor<IRowMapType, IEntriesType, IValuesType, ORowMapType, OEntriesType,
+                                         OValuesType>(threshold, I_row_map, I_entries, I_values, O_row_map, O_entries,
+                                                      O_values));
+  }
+
+
+  /**
+   * Compute residual matrix R = A - LU.
+   *
+   * This factors out the SpADD portion of compute_residual_norm and provides a
+   * reusable hook for future candidate/residual fusion work.
+   */
+  template <class KHandle, class ARowMapType, class AEntriesType, class AValuesType, class LURowMapType,
+            class LUEntriesType, class LUValuesType, class RRowMapType, class REntriesType, class RValuesType>
+  static void compute_residual_matrix(KHandle& kh, const ARowMapType& A_row_map, const AEntriesType& A_entries,
+                                      const AValuesType& A_values, const LURowMapType& LU_row_map,
+                                      const LUEntriesType& LU_entries, const LUValuesType& LU_values,
+                                      RRowMapType& R_row_map, REntriesType& R_entries, RValuesType& R_values) {
+    auto addHandle = kh.get_spadd_handle();
+
+    typename KHandle::const_nnz_lno_t m = A_row_map.extent(0) - 1;
+    typename KHandle::const_nnz_lno_t n = m;
+    typename KHandle::HandleExecSpace exec{};
+
+    if (R_row_map.size() == 0) {
+      Kokkos::realloc(Kokkos::WithoutInitializing, R_row_map, A_row_map.size());
+    }
+
+    KokkosSparse::spadd_symbolic(exec, &kh, m, n, A_row_map, A_entries, LU_row_map, LU_entries, R_row_map);
+
+    const size_type r_nnz = addHandle->get_c_nnz();
+    Kokkos::realloc(Kokkos::WithoutInitializing, R_entries, r_nnz);
+    Kokkos::realloc(Kokkos::WithoutInitializing, R_values, r_nnz);
+
+    KokkosSparse::spadd_numeric(exec, &kh, m, n, A_row_map, A_entries, A_values, scalar_t(1.0), LU_row_map,
+                                LU_entries, LU_values, scalar_t(-1.0), R_row_map, R_entries, R_values);
   }
 
   /**
@@ -622,23 +888,8 @@ struct IlutWrap {
     multiply_matrices(kh, ih, L_row_map, L_entries, L_values, U_row_map, U_entries, U_values, LU_row_map, LU_entries,
                       LU_values);
 
-    auto addHandle                      = kh.get_spadd_handle();
-    typename KHandle::const_nnz_lno_t m = A_row_map.extent(0) - 1,
-                                      n = m;  // square matrix
-    // TODO: let compute_residual_norm also take an execution space argument and
-    // use that for exec!
-    typename KHandle::HandleExecSpace exec{};
-    if (R_row_map.size() == 0) {
-      Kokkos::realloc(Kokkos::WithoutInitializing, R_row_map, A_row_map.size());
-    }
-    KokkosSparse::spadd_symbolic(exec, &kh, m, n, A_row_map, A_entries, LU_row_map, LU_entries, R_row_map);
-
-    const size_type r_nnz = addHandle->get_c_nnz();
-    Kokkos::realloc(Kokkos::WithoutInitializing, R_entries, r_nnz);
-    Kokkos::realloc(Kokkos::WithoutInitializing, R_values, r_nnz);
-
-    KokkosSparse::spadd_numeric(exec, &kh, m, n, A_row_map, A_entries, A_values, 1., LU_row_map, LU_entries, LU_values,
-                                -1., R_row_map, R_entries, R_values);
+    compute_residual_matrix(kh, A_row_map, A_entries, A_values, LU_row_map, LU_entries, LU_values, R_row_map,
+                            R_entries, R_values);
     // TODO: how to make this policy use exec?
     auto policy = ih.get_default_team_policy();
 
@@ -727,6 +978,132 @@ struct IlutWrap {
   }
 
   /**
+   * Initialize factor values on an already-existing L/U pattern.
+   * Entries found in A get copied. Missing fill entries are set to zero.
+   * L diagonal is set to 1; U diagonal is set from A if present, else 1.
+   */
+  template <class ARowMapType, class AEntriesType, class AValuesType, class LRowMapType, class LEntriesType,
+            class LValuesType, class URowMapType, class UEntriesType, class UValuesType>
+  static void initialize_LU_values_on_pattern(IlutHandle& ih, const ARowMapType& A_row_map,
+                                              const AEntriesType& A_entries, const AValuesType& A_values,
+                                              const LRowMapType& L_row_map, const LEntriesType& L_entries,
+                                              LValuesType& L_values, const URowMapType& U_row_map,
+                                              const UEntriesType& U_entries, UValuesType& U_values) {
+    const size_type nrows = ih.get_nrows();
+
+    Kokkos::parallel_for(
+        "initialize_LU_values_on_pattern", range_policy(0, nrows), KOKKOS_LAMBDA(const size_type row_idx) {
+          const auto a_begin = A_row_map(row_idx);
+          const auto a_end   = A_row_map(row_idx + 1);
+
+          {
+            auto a_pos         = a_begin;
+            const auto l_begin = L_row_map(row_idx);
+            const auto l_end   = L_row_map(row_idx + 1);
+
+            for (size_type l_nnz = l_begin; l_nnz < l_end; ++l_nnz) {
+              const auto col_idx = L_entries(l_nnz);
+              if (static_cast<size_type>(col_idx) == row_idx) {
+                L_values(l_nnz) = scalar_t(1.0);
+                continue;
+              }
+
+              while (a_pos < a_end && A_entries(a_pos) < col_idx) {
+                ++a_pos;
+              }
+
+              L_values(l_nnz) = (a_pos < a_end && A_entries(a_pos) == col_idx) ? A_values(a_pos) : scalar_t(0.0);
+            }
+          }
+
+          {
+            auto a_pos         = a_begin;
+            const auto u_begin = U_row_map(row_idx);
+            const auto u_end   = U_row_map(row_idx + 1);
+
+            for (size_type u_nnz = u_begin; u_nnz < u_end; ++u_nnz) {
+              const auto col_idx = U_entries(u_nnz);
+
+              while (a_pos < a_end && A_entries(a_pos) < col_idx) {
+                ++a_pos;
+              }
+
+              if (a_pos < a_end && A_entries(a_pos) == col_idx) {
+                U_values(u_nnz) = A_values(a_pos);
+              } else {
+                U_values(u_nnz) = (static_cast<size_type>(col_idx) == row_idx) ? scalar_t(1.0) : scalar_t(0.0);
+              }
+            }
+          }
+        });
+  }
+
+  template <class LRowMapType, class LEntriesType, class URowMapType, class UEntriesType>
+  static void cache_pattern(IlutHandle& thandle, const LRowMapType& L_row_map, const LEntriesType& L_entries,
+                            const URowMapType& U_row_map, const UEntriesType& U_entries, uint32_t rowmap_hash,
+                            uint32_t entries_hash) {
+    auto& cache_L_row_map   = thandle.get_cached_L_row_map();
+    auto& cache_L_entries   = thandle.get_cached_L_entries();
+    auto& cache_U_row_map   = thandle.get_cached_U_row_map();
+    auto& cache_U_entries   = thandle.get_cached_U_entries();
+    auto& cache_Ut_row_map  = thandle.get_cached_Ut_row_map();
+    auto& cache_Ut_entries  = thandle.get_cached_Ut_entries();
+    auto& cache_U_to_Ut_perm = thandle.get_cached_U_to_Ut_perm();
+
+    Kokkos::realloc(Kokkos::WithoutInitializing, cache_L_row_map, L_row_map.extent(0));
+    Kokkos::realloc(Kokkos::WithoutInitializing, cache_L_entries, L_entries.extent(0));
+    Kokkos::realloc(Kokkos::WithoutInitializing, cache_U_row_map, U_row_map.extent(0));
+    Kokkos::realloc(Kokkos::WithoutInitializing, cache_U_entries, U_entries.extent(0));
+
+    Kokkos::deep_copy(cache_L_row_map, L_row_map);
+    Kokkos::deep_copy(cache_L_entries, L_entries);
+    Kokkos::deep_copy(cache_U_row_map, U_row_map);
+    Kokkos::deep_copy(cache_U_entries, U_entries);
+
+    Kokkos::realloc(Kokkos::WithoutInitializing, cache_Ut_row_map, U_row_map.extent(0));
+    transpose_pattern_with_perm(thandle, cache_U_row_map, cache_U_entries, cache_Ut_row_map, cache_Ut_entries,
+                                cache_U_to_Ut_perm);
+
+    thandle.set_cached_structure_hash(rowmap_hash, entries_hash);
+    thandle.mark_cached_pattern_valid();
+  }
+
+  template <class LRowMapType, class LEntriesType, class URowMapType, class UEntriesType>
+  static void load_cached_pattern(IlutHandle& thandle, LRowMapType& L_row_map, LEntriesType& L_entries,
+                                  URowMapType& U_row_map, UEntriesType& U_entries) {
+    const auto& cache_L_row_map = thandle.get_cached_L_row_map();
+    const auto& cache_L_entries = thandle.get_cached_L_entries();
+    const auto& cache_U_row_map = thandle.get_cached_U_row_map();
+    const auto& cache_U_entries = thandle.get_cached_U_entries();
+
+    // Row maps are caller-owned and may be unmanaged. Do not realloc them here.
+    Kokkos::deep_copy(L_row_map, cache_L_row_map);
+    Kokkos::deep_copy(U_row_map, cache_U_row_map);
+
+    Kokkos::realloc(Kokkos::WithoutInitializing, L_entries, cache_L_entries.extent(0));
+    Kokkos::realloc(Kokkos::WithoutInitializing, U_entries, cache_U_entries.extent(0));
+    Kokkos::deep_copy(L_entries, cache_L_entries);
+    Kokkos::deep_copy(U_entries, cache_U_entries);
+  }
+
+
+  template <class UtRowMapType, class UtEntriesType, class PermType>
+  static void load_cached_transpose_pattern(IlutHandle& thandle, UtRowMapType& Ut_row_map, UtEntriesType& Ut_entries,
+                                            PermType& U_to_Ut_perm) {
+    const auto& cache_Ut_row_map   = thandle.get_cached_Ut_row_map();
+    const auto& cache_Ut_entries   = thandle.get_cached_Ut_entries();
+    const auto& cache_U_to_Ut_perm = thandle.get_cached_U_to_Ut_perm();
+
+    Kokkos::deep_copy(Ut_row_map, cache_Ut_row_map);
+
+    Kokkos::realloc(Kokkos::WithoutInitializing, Ut_entries, cache_Ut_entries.extent(0));
+    Kokkos::realloc(Kokkos::WithoutInitializing, U_to_Ut_perm, cache_U_to_Ut_perm.extent(0));
+
+    Kokkos::deep_copy(Ut_entries, cache_Ut_entries);
+    Kokkos::deep_copy(U_to_Ut_perm, cache_U_to_Ut_perm);
+  }
+
+  /**
    * The main par_ilut numeric function.
    */
   template <class KHandle, class ARowMapType, class AEntriesType, class AValuesType, class LRowMapType,
@@ -744,8 +1121,9 @@ struct IlutWrap {
     const auto residual_norm_delta_stop = thandle.get_residual_norm_delta_stop();
     const size_type max_iter            = thandle.get_max_iter();
 
-    const auto verbose      = thandle.get_verbose();
-    const auto async_update = false;  // thandle.get_async_update();
+    const auto verbose               = thandle.get_verbose();
+    const auto async_update          = false;  // thandle.get_async_update();
+    const auto reuse_numeric_pattern = thandle.get_reuse_numeric_pattern();
 
     if (verbose) {
       std::cout << "Starting PARILUT with..." << std::endl;
@@ -754,6 +1132,27 @@ struct IlutWrap {
       std::cout << "  max_iter:            " << max_iter << std::endl;
       std::cout << "  res_norm_delta_stop: " << residual_norm_delta_stop << std::endl;
       std::cout << "  async_update:        " << async_update << std::endl;
+      std::cout << "  reuse_numeric_pattern: " << reuse_numeric_pattern << std::endl;
+      std::cout << "  threshold_select:    "
+                << (thandle.get_threshold_select_algorithm() ==
+                            KokkosSparse::Experimental::PAR_ILUT_THRESHOLD_SELECT_APPROX_BUCKET
+                        ? "approx_bucket"
+                        : "exact")
+                << std::endl;
+      if (thandle.get_threshold_select_algorithm() ==
+          KokkosSparse::Experimental::PAR_ILUT_THRESHOLD_SELECT_APPROX_BUCKET) {
+        std::cout << "  threshold_buckets:   " << thandle.get_threshold_select_num_buckets() << std::endl;
+      }
+    }
+
+    bool reuse_cached_pattern = false;
+    uint32_t rowmap_hash      = 0;
+    uint32_t entries_hash     = 0;
+    if (reuse_numeric_pattern) {
+      const auto signature = compute_structure_signature(A_row_map, A_entries);
+      rowmap_hash          = signature.first;
+      entries_hash         = signature.second;
+      reuse_cached_pattern = thandle.cached_pattern_matches_structure_hash(rowmap_hash, entries_hash);
     }
 
     kh.create_spadd_handle(true /*we expect inputs to be sorted*/);
@@ -766,108 +1165,178 @@ struct IlutWrap {
         U_new_row_map(Kokkos::view_alloc(Kokkos::WithoutInitializing, "U_new_row_map"), nrows + 1),
         Ut_new_row_map("Ut_new_row_map", nrows + 1);
 
-    HandleDeviceRowMapType R_row_map;
+    HandleDeviceRowMapType R_row_map, U_to_Ut_perm, Threshold_bucket_counts;
     HandleDeviceEntriesType LU_entries, L_new_entries, U_new_entries, Ut_new_entries, R_entries;
-    HandleDeviceValueType LU_values, L_new_values, U_new_values, Ut_new_values, V_copy_d, R_values;
-    auto V_copy = Kokkos::create_mirror_view(V_copy_d);
+    HandleDeviceValueType LU_values, L_new_values, U_new_values, Ut_new_values, R_values;
+    HandleDeviceFloatType V_copy;
 
     size_type itr                  = 0;
     scalar_t curr_residual         = std::numeric_limits<scalar_t>::max();
     scalar_t prev_residual         = std::numeric_limits<scalar_t>::max();
     const bool do_compute_residual = residual_norm_delta_stop > 0;
 
-    // Set the initial L/U values for the initial approximation
-    initialize_LU(thandle, A_row_map, A_entries, A_values, L_row_map, L_entries, L_values, U_row_map, U_entries,
-                  U_values);
+    if (reuse_cached_pattern) {
+      load_cached_pattern(thandle, L_row_map, L_entries, U_row_map, U_entries);
+      load_cached_transpose_pattern(thandle, Ut_new_row_map, Ut_new_entries, U_to_Ut_perm);
 
-    //
-    // main loop
-    //
-    bool stop = nrows == 0;  // Don't iterate at all if nrows=0
-    while (!stop && itr < max_iter) {
-      // LU = L*U
-      //
-      // computing residual does this operation, so we don't need to repeat it if we
-      // are computing residuals.
-      if (itr == 0 || !do_compute_residual) {
-        multiply_matrices(kh, thandle, L_row_map, L_entries, L_values, U_row_map, U_entries, U_values, LU_row_map,
-                          LU_entries, LU_values);
-      }
+      Kokkos::realloc(Kokkos::WithoutInitializing, L_values, L_entries.extent(0));
+      Kokkos::realloc(Kokkos::WithoutInitializing, U_values, U_entries.extent(0));
 
-      // Identify candidate locations and add them
-      add_candidates(thandle, A_row_map, A_entries, A_values, L_row_map, L_entries, L_values, U_row_map, U_entries,
-                     U_values, LU_row_map, LU_entries, LU_values, L_new_row_map, L_new_entries, L_new_values,
-                     U_new_row_map, U_new_entries, U_new_values);
-
-      // Get transpose of U_new, needed for compute_l_u_factors
-      transpose_wrap(thandle, U_new_row_map, U_new_entries, U_new_values, Ut_new_row_map, Ut_new_entries,
-                     Ut_new_values);
-
-      // Do one sweep of the fixed-point ILU algorithm
-      compute_l_u_factors(thandle, A_row_map, A_entries, A_values, L_new_row_map, L_new_entries, L_new_values,
-                          U_new_row_map, U_new_entries, U_new_values, Ut_new_row_map, Ut_new_entries, Ut_new_values,
-                          async_update);
-
-      // Filter smallest elements from L_new and U_new. Store result back
-      // in L and U.
-      {
-        const index_t l_nnz = L_new_values.extent(0);
-        const index_t u_nnz = U_new_values.extent(0);
-
-        const auto l_filter_rank = std::max(static_cast<index_t>(0), l_nnz - l_nnz_limit - 1);
-        const auto u_filter_rank = std::max(static_cast<index_t>(0), u_nnz - u_nnz_limit - 1);
-
-        const auto l_threshold = threshold_select(L_new_values, l_filter_rank, V_copy, V_copy_d);
-        const auto u_threshold = threshold_select(U_new_values, u_filter_rank, V_copy, V_copy_d);
-
-        threshold_filter(thandle, l_threshold, L_new_row_map, L_new_entries, L_new_values, L_row_map, L_entries,
-                         L_values);
-
-        threshold_filter(thandle, u_threshold, U_new_row_map, U_new_entries, U_new_values, U_row_map, U_entries,
-                         U_values);
-      }
-
-      // Get transpose of U, needed for compute_l_u_factors. Store in Ut_new*
-      // since we aren't using those temporaries anymore
-      transpose_wrap(thandle, U_row_map, U_entries, U_values, Ut_new_row_map, Ut_new_entries, Ut_new_values);
-
-      // Do one sweep of the fixed-point ILU algorithm
-      compute_l_u_factors(thandle, A_row_map, A_entries, A_values, L_row_map, L_entries, L_values, U_row_map, U_entries,
-                          U_values, Ut_new_row_map, Ut_new_entries, Ut_new_values, async_update);
+      initialize_LU_values_on_pattern(thandle, A_row_map, A_entries, A_values, L_row_map, L_entries, L_values,
+                                      U_row_map, U_entries, U_values);
 
       //
-      // Compute residual and check stop conditions
+      // main loop
       //
-      // compute_residual_norm can use a lot of memory, especially if fill_in_limit is
-      // large. If user selects residual_norm_delta_stop <= 0, just skip this step and
-      // always run max_iters times.
-      //
-      if (do_compute_residual) {
-        curr_residual = compute_residual_norm(kh, thandle, A_row_map, A_entries, A_values, L_row_map, L_entries,
-                                              L_values, U_row_map, U_entries, U_values, R_row_map, R_entries, R_values,
-                                              LU_row_map, LU_entries, LU_values);
+      bool stop = nrows == 0;
+      while (!stop && itr < max_iter) {
+        // U's pattern is fixed in the cached-pattern path. Reuse the cached
+        // transpose pattern and only refresh the transposed values.
+        update_transpose_values(U_values, U_to_Ut_perm, Ut_new_values);
 
-        if (verbose) {
-          std::cout << "Completed itr " << itr << ", residual is: " << curr_residual << std::endl;
-        }
+        // Do one sweep of the fixed-point ILU algorithm
+        compute_l_u_factors(thandle, A_row_map, A_entries, A_values, L_row_map, L_entries, L_values, U_row_map,
+                            U_entries, U_values, Ut_new_row_map, Ut_new_entries, Ut_new_values, async_update);
 
-        const auto curr_delta = karith::abs(prev_residual - curr_residual);
-        if (curr_delta <= residual_norm_delta_stop) {
+        //
+        // Compute residual and check stop conditions
+        //
+        // compute_residual_norm can use a lot of memory, especially if fill_in_limit is
+        // large. If user selects residual_norm_delta_stop <= 0, just skip this step and
+        // always run max_iters times.
+        //
+        if (do_compute_residual) {
+          curr_residual = compute_residual_norm(kh, thandle, A_row_map, A_entries, A_values, L_row_map, L_entries,
+                                                L_values, U_row_map, U_entries, U_values, R_row_map, R_entries,
+                                                R_values, LU_row_map, LU_entries, LU_values);
+
           if (verbose) {
-            std::cout << "  Itr-to-itr residual change has dropped below "
-                         "residual_norm_delta_stop, stop"
-                      << std::endl;
+            std::cout << "Completed itr " << itr << ", residual is: " << curr_residual << std::endl;
           }
-          stop = true;
+
+          const auto curr_delta = karith::abs(prev_residual - curr_residual);
+          if (curr_delta <= residual_norm_delta_stop) {
+            if (verbose) {
+              std::cout << "  Itr-to-itr residual change has dropped below residual_norm_delta_stop, stop" << std::endl;
+            }
+            stop = true;
+          } else {
+            prev_residual = curr_residual;
+          }
         } else {
-          prev_residual = curr_residual;
+          if (verbose) {
+            std::cout << "Completed itr " << itr << ", residual is unknown." << std::endl;
+          }
+          curr_residual = 0;
+          prev_residual = 0;
         }
-      } else {
-        curr_residual = 0;
-        prev_residual = 0;
+
+        ++itr;
+      }
+    } else {
+      // Set the initial L/U values for the initial approximation
+      initialize_LU(thandle, A_row_map, A_entries, A_values, L_row_map, L_entries, L_values, U_row_map, U_entries,
+                    U_values);
+
+      //
+      // main loop
+      //
+      bool stop = nrows == 0;  // Don't iterate at all if nrows=0
+      while (!stop && itr < max_iter) {
+        // LU = L*U
+        //
+        // computing residual does this operation, so we don't need to repeat it if we
+        // are computing residuals.
+        if (itr == 0 || !do_compute_residual) {
+          multiply_matrices(kh, thandle, L_row_map, L_entries, L_values, U_row_map, U_entries, U_values, LU_row_map,
+                            LU_entries, LU_values);
+        }
+
+        // Identify candidate locations and add them
+        add_candidates(thandle, A_row_map, A_entries, A_values, L_row_map, L_entries, L_values, U_row_map, U_entries,
+                       U_values, LU_row_map, LU_entries, LU_values, L_new_row_map, L_new_entries, L_new_values,
+                       U_new_row_map, U_new_entries, U_new_values);
+
+        // Get transpose of U_new, needed for compute_l_u_factors
+        transpose_wrap(thandle, U_new_row_map, U_new_entries, U_new_values, Ut_new_row_map, Ut_new_entries,
+                       Ut_new_values);
+
+        // Do one sweep of the fixed-point ILU algorithm
+        compute_l_u_factors(thandle, A_row_map, A_entries, A_values, L_new_row_map, L_new_entries, L_new_values,
+                            U_new_row_map, U_new_entries, U_new_values, Ut_new_row_map, Ut_new_entries, Ut_new_values,
+                            async_update);
+
+        // Filter smallest elements from L_new and U_new. Store result back
+        // in L and U.
+        {
+          const index_t l_nnz = L_new_values.extent(0);
+          const index_t u_nnz = U_new_values.extent(0);
+
+          const auto l_filter_rank = std::max(static_cast<index_t>(0), l_nnz - l_nnz_limit - 1);
+          const auto u_filter_rank = std::max(static_cast<index_t>(0), u_nnz - u_nnz_limit - 1);
+
+          const auto l_threshold =
+              threshold_select_dispatch(thandle, L_new_values, l_filter_rank, V_copy, Threshold_bucket_counts);
+          const auto u_threshold =
+              threshold_select_dispatch(thandle, U_new_values, u_filter_rank, V_copy, Threshold_bucket_counts);
+
+          threshold_filter(thandle, l_threshold, L_new_row_map, L_new_entries, L_new_values, L_row_map, L_entries,
+                           L_values);
+
+          threshold_filter(thandle, u_threshold, U_new_row_map, U_new_entries, U_new_values, U_row_map, U_entries,
+                           U_values);
+        }
+
+        // Get transpose of U, needed for compute_l_u_factors. Store in Ut_new*
+        // since we aren't using those temporaries anymore
+        transpose_wrap(thandle, U_row_map, U_entries, U_values, Ut_new_row_map, Ut_new_entries, Ut_new_values);
+
+        // Do one sweep of the fixed-point ILU algorithm
+        compute_l_u_factors(thandle, A_row_map, A_entries, A_values, L_row_map, L_entries, L_values, U_row_map,
+                            U_entries, U_values, Ut_new_row_map, Ut_new_entries, Ut_new_values, async_update);
+
+        //
+        // Compute residual and check stop conditions
+        //
+        // compute_residual_norm can use a lot of memory, especially if fill_in_limit is
+        // large. If user selects residual_norm_delta_stop <= 0, just skip this step and
+        // always run max_iters times.
+        //
+        if (do_compute_residual) {
+          curr_residual = compute_residual_norm(kh, thandle, A_row_map, A_entries, A_values, L_row_map, L_entries,
+                                                L_values, U_row_map, U_entries, U_values, R_row_map, R_entries,
+                                                R_values, LU_row_map, LU_entries, LU_values);
+
+          if (verbose) {
+            std::cout << "Completed itr " << itr << ", residual is: " << curr_residual << std::endl;
+          }
+
+          const auto curr_delta = karith::abs(prev_residual - curr_residual);
+          if (curr_delta <= residual_norm_delta_stop) {
+            if (verbose) {
+              std::cout << "  Itr-to-itr residual change has dropped below "
+                           "residual_norm_delta_stop, stop"
+                        << std::endl;
+            }
+            stop = true;
+          } else {
+            prev_residual = curr_residual;
+          }
+        } else {
+          if (verbose) {
+            std::cout << "Completed itr " << itr << ", residual is unknown." << std::endl;
+          }
+
+          curr_residual = 0;
+          prev_residual = 0;
+        }
+
+        ++itr;
       }
 
-      ++itr;
+      if (reuse_numeric_pattern) {
+        cache_pattern(thandle, L_row_map, L_entries, U_row_map, U_entries, rowmap_hash, entries_hash);
+      }
     }
 
     curr_residual = nrows == 0 ? scalar_t(0.) : curr_residual;

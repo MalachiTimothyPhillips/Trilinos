@@ -547,6 +547,12 @@ void ILUT<MatrixType>::initialize() {
       par_ilut_handle->set_async_update(false);
       par_ilut_handle->set_reuse_numeric_pattern(par_ilut_options_.reuse_sparsity);
 
+      // TODO: generalize
+      par_ilut_handle->set_threshold_select_algorithm(
+          KokkosSparse::Experimental::PAR_ILUT_THRESHOLD_SELECT_APPROX_BUCKET);
+      
+      par_ilut_handle->set_threshold_select_num_buckets(256);
+
       {
         Kokkos::Profiling::ScopedRegion region("Ifpack2::ILUT::initialize::par_ilut::get_or_build_A_local_crs");
         A_local_crs_ = Ifpack2::Details::getCrsMatrix(A_local_);
