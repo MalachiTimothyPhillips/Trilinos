@@ -269,6 +269,7 @@ void ILUT<MatrixType>::setParameters(const Teuchos::ParameterList& params) {
     getParamTryingTypes<magnitude_type, magnitude_type, double>(dropTol, params, paramName, prefix);
   }
 
+  // TODO: Add in knob to control bin sizes?
   int par_ilut_max_iter                            = 20;
   magnitude_type par_ilut_residual_norm_delta_stop = 1e-2;
   int par_ilut_team_size                           = 0;
@@ -276,6 +277,8 @@ void ILUT<MatrixType>::setParameters(const Teuchos::ParameterList& params) {
   float par_ilut_fill_in_limit                     = 0.75;
   bool par_ilut_verbose                            = false;
   bool par_ilut_reuse_sparsity                     = false;
+  int par_ilut_select_num_buckets                  = 256;
+  KokkosSparse::Experimental::PAR_ILUTThresholdSelectAlgorithm par_ilut_select_alg = KokkosSparse::Experimental::PAR_ILUT_THRESHOLD_SELECT_APPROX_BUCKET;
   if (this->useKokkosKernelsParILUT_) {
     par_ilut_max_iter                 = par_ilut_options_.max_iter;
     par_ilut_residual_norm_delta_stop = par_ilut_options_.residual_norm_delta_stop;
@@ -284,6 +287,8 @@ void ILUT<MatrixType>::setParameters(const Teuchos::ParameterList& params) {
     par_ilut_fill_in_limit            = par_ilut_options_.fill_in_limit;
     par_ilut_verbose                  = par_ilut_options_.verbose;
     par_ilut_reuse_sparsity           = par_ilut_options_.reuse_sparsity;
+    par_ilut_select_alg               = par_ilut_options_.select_alg;
+    par_ilut_select_num_buckets       = par_ilut_options_.select_num_buckets;
 
     std::string par_ilut_plist_name("parallel ILUT options");
     if (params.isSublist(par_ilut_plist_name)) {
@@ -310,6 +315,15 @@ void ILUT<MatrixType>::setParameters(const Teuchos::ParameterList& params) {
       paramName = "reuse sparsity";
       getParamTryingTypes<bool, bool>(par_ilut_reuse_sparsity, par_ilut_plist, paramName, prefix);
 
+      paramName = "select num buckets";
+      getParamTryingTypes<int, int>(par_ilut_select_num_buckets, par_ilut_plist, paramName, prefix);
+
+      if(params.isParameter("selection algorithm")){
+        const auto alg = par_ilut_plist.get<std::string>("selection algorithm");
+        par_ilut_select_alg = KokkosSparse::Experimental::to_par_ilut_threshold_select_alg_enum(alg);
+      }
+
+
     }  // if (params.isSublist(par_ilut_plist_name))
 
     par_ilut_options_.max_iter                 = par_ilut_max_iter;
@@ -319,6 +333,8 @@ void ILUT<MatrixType>::setParameters(const Teuchos::ParameterList& params) {
     par_ilut_options_.fill_in_limit            = par_ilut_fill_in_limit;
     par_ilut_options_.verbose                  = par_ilut_verbose;
     par_ilut_options_.reuse_sparsity           = par_ilut_reuse_sparsity;
+    par_ilut_options_.select_alg               = par_ilut_select_alg;
+    par_ilut_options_.select_num_buckets       = par_ilut_select_num_buckets;
 
   }  // if (this->useKokkosKernelsParILUT_)
 
@@ -546,12 +562,8 @@ void ILUT<MatrixType>::initialize() {
       par_ilut_handle->set_verbose(par_ilut_options_.verbose);
       par_ilut_handle->set_async_update(false);
       par_ilut_handle->set_reuse_numeric_pattern(par_ilut_options_.reuse_sparsity);
-
-      // TODO: generalize
-      par_ilut_handle->set_threshold_select_algorithm(
-          KokkosSparse::Experimental::PAR_ILUT_THRESHOLD_SELECT_APPROX_BUCKET);
-      
-      par_ilut_handle->set_threshold_select_num_buckets(256);
+      par_ilut_handle->set_threshold_select_algorithm(par_ilut_options_.select_alg);
+      par_ilut_handle->set_threshold_select_num_buckets(par_ilut_options_.select_num_buckets);
 
       {
         Kokkos::Profiling::ScopedRegion region("Ifpack2::ILUT::initialize::par_ilut::get_or_build_A_local_crs");

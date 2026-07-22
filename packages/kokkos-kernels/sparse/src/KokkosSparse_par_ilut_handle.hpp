@@ -5,6 +5,10 @@
 #include <iostream>
 #include <string>
 #include <cstdint>
+#include <algorithm>
+#include <cctype>
+#include <stdexcept>
+#include <string_view>
 
 #ifndef KOKKOSSPARSE_PAR_ILUTHANDLE_HPP
 #define KOKKOSSPARSE_PAR_ILUTHANDLE_HPP
@@ -16,6 +20,37 @@ enum PAR_ILUTThresholdSelectAlgorithm {
   PAR_ILUT_THRESHOLD_SELECT_EXACT,
   PAR_ILUT_THRESHOLD_SELECT_APPROX_BUCKET
 };
+
+inline std::string to_string(PAR_ILUTThresholdSelectAlgorithm value) {
+  switch (value) {
+    case PAR_ILUT_THRESHOLD_SELECT_EXACT:
+      return "THRESHOLD_SELECT_EXACT";
+    case PAR_ILUT_THRESHOLD_SELECT_APPROX_BUCKET:
+      return "THRESHOLD_SELECT_APPROX_BUCKET";
+    default:
+      throw std::invalid_argument("Invalid PAR_ILUTThresholdSelectAlgorithm value");
+  }
+}
+
+inline PAR_ILUTThresholdSelectAlgorithm to_par_ilut_threshold_select_alg_enum(std::string_view value) {
+  std::string normalized(value);
+
+  std::transform(
+      normalized.begin(),
+      normalized.end(),
+      normalized.begin(),
+      [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+
+  if (normalized == "THRESHOLD_SELECT_EXACT") {
+    return PAR_ILUT_THRESHOLD_SELECT_EXACT;
+  }
+  if (normalized == "THRESHOLD_SELECT_APPROX_BUCKET") {
+    return PAR_ILUT_THRESHOLD_SELECT_APPROX_BUCKET;
+  }
+
+  throw std::invalid_argument(
+      "Invalid PAR_ILUTThresholdSelectAlgorithm string: " + std::string(value));
+}
 
 
 /**

@@ -788,7 +788,7 @@ struct IlutWrap {
             const auto col_idx = I_entries(innz);
 
             const bool keep =
-                karith::abs(I_values(innz)) >= threshold || static_cast<size_type>(col_idx) == row_idx;
+                karith::abs(I_values(innz)) >= threshold || static_cast<size_type>(col_idx) == static_cast<size_type>(row_idx);
 
             const size_type local_pos = update;
             update += keep ? size_type(1) : size_type(0);
@@ -819,7 +819,6 @@ struct IlutWrap {
                                const IEntriesType& I_entries, const IValuesType& I_values, ORowMapType& O_row_map,
                                OEntriesType& O_entries, OValuesType& O_values) {
     const auto policy     = ih.get_default_team_policy();
-    const size_type nrows = ih.get_nrows();
 
     Kokkos::parallel_for("threshold_filter count", policy,
                          ThresholdFilterCountFunctor<IRowMapType, IEntriesType, IValuesType, ORowMapType>(

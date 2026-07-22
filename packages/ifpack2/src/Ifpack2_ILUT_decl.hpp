@@ -445,6 +445,8 @@ class ILUT : virtual public Ifpack2::Preconditioner<typename MatrixType::scalar_
     double fill_in_limit;  // Note: par_ilut declares this as float
     bool verbose;
     bool reuse_sparsity;
+    KokkosSparse::Experimental::PAR_ILUTThresholdSelectAlgorithm select_alg;
+    int select_num_buckets;
   } par_ilut_options_;
 
   //@}
