@@ -27,116 +27,176 @@ namespace Zoltan2{
 template <typename Adapter>
 class AlgMetis : public Algorithm<Adapter>
 {
-    private:
+private:
 
-    const RCP<const typename Adapter::base_adapter_t> adapter;
-    const RCP<Teuchos::ParameterList> pl;
-    const RCP<const Teuchos::Comm<int> > comm;
-    RCP<const Environment> env;
-    modelFlag_t graphFlags;
+  const RCP<const typename Adapter::base_adapter_t> adapter;
+  const RCP<Teuchos::ParameterList> pl;
+  const RCP<const Teuchos::Comm<int> > comm;
+  RCP<const Environment> env;
+  modelFlag_t graphFlags;
 
-    public:
+  bool getSymmetrizeGraphFlag() const
+  {
+    // Preserve existing behavior by default.
+    return pl.is_null() ? true : pl->get<bool>("symmetrize", true);
+  }
 
-    AlgMetis(
-      const RCP<const typename Adapter::base_adapter_t> &adapter__,
-      const RCP<Teuchos::ParameterList> &pl__,
-      const RCP<const Teuchos::Comm<int> > &comm__,
-      RCP<const Environment> &env__,
-      const modelFlag_t &graphFlags__
-    ) : adapter(adapter__), pl(pl__), comm(comm__), env(env__), graphFlags(graphFlags__)
-    { }
+public:
 
-    int globalOrder(
-      const RCP<GlobalOrderingSolution<typename Adapter::gno_t> > &/* solution */) {
-        throw std::logic_error("AlgMetis does not yet support global ordering.");
-    }
+  AlgMetis(
+    const RCP<const typename Adapter::base_adapter_t> &adapter__,
+    const RCP<Teuchos::ParameterList> &pl__,
+    const RCP<const Teuchos::Comm<int> > &comm__,
+    RCP<const Environment> &env__,
+    const modelFlag_t &graphFlags__
+  ) :
+    adapter(adapter__),
+    pl(pl__),
+    comm(comm__),
+    env(env__),
+    graphFlags(graphFlags__)
+  { }
 
-    int localOrder(
-      const RCP<LocalOrderingSolution<typename Adapter::lno_t> > &solution)
-    {
+  int globalOrder(
+    const RCP<GlobalOrderingSolution<typename Adapter::gno_t> > &/* solution */)
+  {
+    throw std::logic_error("AlgMetis does not yet support global ordering.");
+  }
+
+  int localOrder(
+    const RCP<LocalOrderingSolution<typename Adapter::lno_t> > &solution)
+  {
 #ifndef HAVE_ZOLTAN2_METIS
-      (void)solution; // remove unused parameter warning
-  throw std::runtime_error(
-        "BUILD ERROR: Metis requested but not compiled into Zoltan2.\n"
-        "Please set CMake flag Zoltan2_ENABLE_METIS:BOOL=ON.");
+    (void)solution; // remove unused parameter warning
+
+    throw std::runtime_error(
+      "BUILD ERROR: Metis requested but not compiled into Zoltan2.\n"
+      "Please set CMake flag Zoltan2_ENABLE_METIS:BOOL=ON.");
 #else
-      typedef typename Adapter::gno_t gno_t;
-      typedef typename Adapter::lno_t lno_t;
-      typedef typename Adapter::offset_t offset_t;
-      typedef typename Adapter::scalar_t scalar_t;
+    typedef typename Adapter::gno_t gno_t;
+    typedef typename Adapter::lno_t lno_t;
+    typedef typename Adapter::offset_t offset_t;
+    typedef typename Adapter::scalar_t scalar_t;
 
-      int ierr= 0;
+    int ierr = 0;
 
-      // Get EdgeList
-      const auto model = rcp(new GraphModel<Adapter>(adapter, env, comm, graphFlags));
-      const size_t nVtx = model->getLocalNumVertices();
-      const size_t nNnz = model->getLocalNumEdges();
-      lno_t *perm = (lno_t *) (solution->getPermutationRCP().getRawPtr());
+    // Get edge list.
+    const auto model = rcp(new GraphModel<Adapter>(adapter, env, comm, graphFlags));
+    const size_t nVtx = model->getLocalNumVertices();
+    const size_t nNnz = model->getLocalNumEdges();
 
-      if (nVtx > 0 && nNnz > 0) {
-        ArrayView<const gno_t> edgeIds;
-        ArrayView<const offset_t> offsets;
-        ArrayView<StridedData<lno_t, scalar_t> > wgts; // wgts are ignored in NodeND
-        model->getEdgeList(edgeIds, offsets, wgts);
+    lno_t *perm = static_cast<lno_t *>(solution->getPermutationRCP().getRawPtr());
 
-        // Prepare for calling metis
-        using Zoltan2OffsetView = typename Kokkos::View<offset_t*, Kokkos::HostSpace>;
-        using Zoltan2EdgeView = typename Kokkos::View<gno_t*, Kokkos::HostSpace>;
-        Zoltan2OffsetView zoltan2_rowptr (const_cast<offset_t*>(offsets.data()), nVtx+1);
-        Zoltan2EdgeView   zoltan2_colidx (const_cast<gno_t*>(edgeIds.data()), nNnz);
+    if (nVtx > 0 && nNnz > 0) {
+      ArrayView<const gno_t> edgeIds;
+      ArrayView<const offset_t> offsets;
+      ArrayView<StridedData<lno_t, scalar_t> > wgts; // wgts are ignored in NodeND
 
-        using MetisIdxView = typename Kokkos::View<idx_t*, Kokkos::HostSpace>;
-        MetisIdxView metis_rowptr;
-        MetisIdxView metis_colidx;
+      model->getEdgeList(edgeIds, offsets, wgts);
 
-        // Symmetrize (always for now)
+      // Prepare Zoltan2 graph views.
+      using Zoltan2OffsetView = Kokkos::View<offset_t*, Kokkos::HostSpace>;
+      using Zoltan2EdgeView   = Kokkos::View<gno_t*, Kokkos::HostSpace>;
+
+      Zoltan2OffsetView zoltan2_rowptr(
+        const_cast<offset_t *>(offsets.data()),
+        nVtx + 1);
+
+      Zoltan2EdgeView zoltan2_colidx(
+        const_cast<gno_t *>(edgeIds.data()),
+        nNnz);
+
+      // METIS requires idx_t arrays.
+      using MetisIdxView = Kokkos::View<idx_t*, Kokkos::HostSpace>;
+
+      MetisIdxView metis_rowptr;
+      MetisIdxView metis_colidx;
+
+      const bool doSymmetrize = getSymmetrizeGraphFlag();
+
+      if (doSymmetrize) {
+        // Existing behavior:
+        // METIS_NodeND expects an undirected graph, so explicitly symmetrize.
         KokkosKernels::Impl::symmetrize_graph_symbolic_hashmap<
-          Zoltan2OffsetView, Zoltan2EdgeView, MetisIdxView, MetisIdxView, Kokkos::HostSpace::execution_space>
+          Zoltan2OffsetView,
+          Zoltan2EdgeView,
+          MetisIdxView,
+          MetisIdxView,
+          Kokkos::HostSpace::execution_space>
           (nVtx, zoltan2_rowptr, zoltan2_colidx, metis_rowptr, metis_colidx);
+      }
+      else {
+        // New behavior:
+        // Skip symmetrization and assume the input graph is already suitable
+        // for METIS_NodeND.
+        //
+        // We still copy into idx_t arrays because METIS requires idx_t.
+        metis_rowptr = MetisIdxView("metis_rowptr", nVtx + 1);
+        metis_colidx = MetisIdxView("metis_colidx", nNnz);
 
-        // Remove diagonals
-        idx_t metis_nVtx=0;
-        TPL_Traits<idx_t, size_t>::ASSIGN(metis_nVtx, nVtx);
-
-        idx_t nnz = metis_rowptr(0);
-        idx_t old_nnz = nnz;
-        for (idx_t i = 0; i < metis_nVtx; i++) {
-          for (idx_t k = old_nnz; k < metis_rowptr(i+1); k++) {
-            if (metis_colidx(k) != i) {
-              metis_colidx(nnz) = metis_colidx(k);
-              nnz++;
-            }
-          }
-          old_nnz = metis_rowptr(i+1);
-          metis_rowptr(i+1) = nnz;
+        for (size_t i = 0; i < nVtx + 1; ++i) {
+          TPL_Traits<idx_t, offset_t>::ASSIGN(metis_rowptr(i), offsets[i]);
         }
 
-        // Allocate Metis perm/iperm
-        idx_t *metis_perm = new idx_t[nVtx];
-        idx_t *metis_iperm = new idx_t[nVtx];
-
-        // Call metis
-        int info = METIS_NodeND(&metis_nVtx, metis_rowptr.data(), metis_colidx.data(),
-                                NULL, NULL, metis_perm, metis_iperm);
-        if (METIS_OK != info) {
-          throw std::runtime_error("METIS_NodeND returned info = " + std::to_string(info));
+        for (size_t k = 0; k < nNnz; ++k) {
+          TPL_Traits<idx_t, gno_t>::ASSIGN(metis_colidx(k), edgeIds[k]);
         }
-
-        // Copy result back
-        for (size_t i = 0; i < nVtx; i++)
-          TPL_Traits<lno_t, idx_t>::ASSIGN(perm[i], metis_perm[i]);
-
-        delete [] metis_iperm;
-        delete [] metis_perm;
-      } else {
-        for (size_t i = 0; i < nVtx; i++)
-          perm[i] = i;
       }
 
-      solution->setHavePerm(true);
-      return ierr;
-#endif
+      // Remove diagonals.
+      idx_t metis_nVtx = 0;
+      TPL_Traits<idx_t, size_t>::ASSIGN(metis_nVtx, nVtx);
+
+      idx_t nnz = metis_rowptr(0);
+      idx_t old_nnz = nnz;
+
+      for (idx_t i = 0; i < metis_nVtx; i++) {
+        for (idx_t k = old_nnz; k < metis_rowptr(i + 1); k++) {
+          if (metis_colidx(k) != i) {
+            metis_colidx(nnz) = metis_colidx(k);
+            nnz++;
+          }
+        }
+
+        old_nnz = metis_rowptr(i + 1);
+        metis_rowptr(i + 1) = nnz;
+      }
+
+      // Allocate METIS permutation arrays.
+      std::vector<idx_t> metis_perm(nVtx);
+      std::vector<idx_t> metis_iperm(nVtx);
+
+      // Call METIS.
+      int info = METIS_NodeND(
+        &metis_nVtx,
+        metis_rowptr.data(),
+        metis_colidx.data(),
+        NULL,
+        NULL,
+        metis_perm.data(),
+        metis_iperm.data());
+
+      if (METIS_OK != info) {
+        throw std::runtime_error(
+          "METIS_NodeND returned info = " + std::to_string(info));
+      }
+
+      // Copy result back.
+      for (size_t i = 0; i < nVtx; i++) {
+        TPL_Traits<lno_t, idx_t>::ASSIGN(perm[i], metis_perm[i]);
+      }
     }
+    else {
+      for (size_t i = 0; i < nVtx; i++) {
+        perm[i] = i;
+      }
+    }
+
+    solution->setHavePerm(true);
+
+    return ierr;
+#endif
+  }
 };
 
 }
