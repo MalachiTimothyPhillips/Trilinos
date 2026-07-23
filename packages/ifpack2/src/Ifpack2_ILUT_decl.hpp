@@ -447,6 +447,7 @@ class ILUT : virtual public Ifpack2::Preconditioner<typename MatrixType::scalar_
     bool reuse_sparsity;
     KokkosSparse::Experimental::PAR_ILUTThresholdSelectAlgorithm select_alg;
     int select_num_buckets;
+    int select_sample_size;
   } par_ilut_options_;
 
   //@}

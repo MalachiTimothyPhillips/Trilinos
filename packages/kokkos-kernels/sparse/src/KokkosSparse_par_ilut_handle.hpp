@@ -18,7 +18,8 @@ namespace Experimental {
 
 enum PAR_ILUTThresholdSelectAlgorithm {
   PAR_ILUT_THRESHOLD_SELECT_EXACT,
-  PAR_ILUT_THRESHOLD_SELECT_APPROX_BUCKET
+  PAR_ILUT_THRESHOLD_SELECT_APPROX_BUCKET,
+  PAR_ILUT_THRESHOLD_SELECT_APPROX_EQUAL_DETERMINED_TREE
 };
 
 inline std::string to_string(PAR_ILUTThresholdSelectAlgorithm value) {
@@ -27,6 +28,8 @@ inline std::string to_string(PAR_ILUTThresholdSelectAlgorithm value) {
       return "THRESHOLD_SELECT_EXACT";
     case PAR_ILUT_THRESHOLD_SELECT_APPROX_BUCKET:
       return "THRESHOLD_SELECT_APPROX_BUCKET";
+    case PAR_ILUT_THRESHOLD_SELECT_APPROX_EQUAL_DETERMINED_TREE:
+      return "THRESHOLD_SELECT_APPROX_EQUAL_DETERMINED_TREE";
     default:
       throw std::invalid_argument("Invalid PAR_ILUTThresholdSelectAlgorithm value");
   }
@@ -46,6 +49,9 @@ inline PAR_ILUTThresholdSelectAlgorithm to_par_ilut_threshold_select_alg_enum(st
   }
   if (normalized == "THRESHOLD_SELECT_APPROX_BUCKET") {
     return PAR_ILUT_THRESHOLD_SELECT_APPROX_BUCKET;
+  }
+  if (normalized == "THRESHOLD_SELECT_APPROX_EQUAL_DETERMINED_TREE") {
+    return PAR_ILUT_THRESHOLD_SELECT_APPROX_EQUAL_DETERMINED_TREE;
   }
 
   throw std::invalid_argument(
@@ -132,6 +138,7 @@ class PAR_ILUTHandle {
 
   PAR_ILUTThresholdSelectAlgorithm threshold_select_algorithm;
   int threshold_select_num_buckets;
+  int threshold_select_sample_size;
 
   // Stored by parent KokkosKernelsHandle
   int team_size;    /// Kokkos team size. Set by the parent handle. -1 implies
@@ -176,6 +183,7 @@ class PAR_ILUTHandle {
         reuse_numeric_pattern(false),
         threshold_select_algorithm(PAR_ILUT_THRESHOLD_SELECT_EXACT),
         threshold_select_num_buckets(256),
+        threshold_select_sample_size(4096),
         team_size(-1),
         vector_size(-1),
         nrows(0),
@@ -291,6 +299,13 @@ class PAR_ILUTHandle {
 
   void set_threshold_select_num_buckets(const int threshold_select_num_buckets_) {
     this->threshold_select_num_buckets = threshold_select_num_buckets_ > 0 ? threshold_select_num_buckets_ : 1;
+    clear_cached_pattern();
+  }
+
+  int get_threshold_select_sample_size() const { return threshold_select_sample_size; }
+
+  void set_threshold_select_sample_size(const int threshold_select_sample_size_) {
+    this->threshold_select_sample_size = threshold_select_sample_size_ > 0 ? threshold_select_sample_size_ : 1;
     clear_cached_pattern();
   }
 

@@ -672,16 +672,154 @@ struct IlutWrap {
     return min_abs + static_cast<float_t>(selected_bucket) * width;
   }
 
+
+  /**
+   * Approximate threshold selection using a sample-splitter balanced
+   * equal-determined classification tree.
+   *
+   * This implements the key threshold-selection idea from the ParILUT-GPU
+   * optimization paper:
+   *
+   *   1. deterministically sample abs(values),
+   *   2. sort the sample,
+   *   3. choose sample quantiles as splitters,
+   *   4. classify each value through a balanced splitter tree,
+   *   5. when value == splitter, route by index parity so equal values do not
+   *      all fall into one fat bucket,
+   *   6. find the bucket containing the requested rank,
+   *   7. return a conservative lower-bound threshold for that bucket.
+   *
+   * This is still approximate. It may keep a different number of entries than
+   * exact threshold_select, but exact selection remains the default algorithm.
+   */
+  template <class ValuesType, class ValuesFloatType, class BucketCountsType>
+  static float_t threshold_select_equal_determined_tree(IlutHandle& ih, const ValuesType& values,
+                                                        const typename IlutHandle::nnz_lno_t rank,
+                                                        ValuesFloatType& sample_values,
+                                                        ValuesFloatType& splitters,
+                                                        BucketCountsType& bucket_counts) {
+    const index_t size = values.extent(0);
+
+    if (size <= 0) {
+      return float_t(0);
+    }
+
+    const index_t clamped_rank =
+        std::min(std::max(static_cast<index_t>(0), rank), static_cast<index_t>(size - 1));
+
+    const int requested_num_buckets = ih.get_threshold_select_num_buckets();
+    const size_type num_buckets =
+        static_cast<size_type>(requested_num_buckets > 1 ? requested_num_buckets : 2);
+    const size_type num_splitters = num_buckets - 1;
+
+    const int requested_sample_size = ih.get_threshold_select_sample_size();
+    const size_type sample_size =
+        std::min(static_cast<size_type>(size),
+                 static_cast<size_type>(requested_sample_size > 0 ? requested_sample_size : 1));
+
+    Kokkos::realloc(Kokkos::WithoutInitializing, sample_values, sample_size);
+    Kokkos::realloc(Kokkos::WithoutInitializing, splitters, num_splitters);
+    Kokkos::realloc(Kokkos::WithoutInitializing, bucket_counts, num_buckets);
+
+    // Deterministic strided sample of absolute values. This avoids introducing
+    // RNG state while still making the splitters data-dependent.
+    Kokkos::parallel_for(
+        "threshold_select_edt sample", range_policy(0, sample_size),
+        KOKKOS_LAMBDA(const size_type k) {
+          const size_type idx = (k * static_cast<size_type>(size)) / sample_size;
+          sample_values(k)    = karith::abs(values(idx));
+        });
+
+    Kokkos::sort(sample_values);
+
+    // Choose approximate quantile splitters from the sorted sample.
+    Kokkos::parallel_for(
+        "threshold_select_edt splitters", range_policy(0, num_splitters),
+        KOKKOS_LAMBDA(const size_type j) {
+          size_type sample_idx = ((j + 1) * sample_size) / num_buckets;
+          if (sample_idx >= sample_size) {
+            sample_idx = sample_size - 1;
+          }
+          splitters(j) = sample_values(sample_idx);
+        });
+
+    Kokkos::deep_copy(bucket_counts, size_type(0));
+
+    Kokkos::parallel_for(
+        "threshold_select_edt classify", range_policy(0, static_cast<size_type>(size)),
+        KOKKOS_LAMBDA(const size_type i) {
+          const float_t v = karith::abs(values(i));
+
+          // Binary search over sorted splitters is a balanced classification
+          // tree. The equality case is the equal-determined branch: index
+          // parity sends equal values to opposite sides of the tree.
+          size_type lo = 0;
+          size_type hi = num_splitters;
+
+          while (lo < hi) {
+            const size_type mid = lo + (hi - lo) / 2;
+            const float_t s     = splitters(mid);
+
+            if (v < s) {
+              hi = mid;
+            } else if (v > s) {
+              lo = mid + 1;
+            } else {
+              if ((i & size_type(1)) == size_type(0)) {
+                hi = mid;
+              } else {
+                lo = mid + 1;
+              }
+            }
+          }
+
+          Kokkos::atomic_add(&bucket_counts(lo), size_type(1));
+        });
+
+    auto bucket_counts_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), bucket_counts);
+
+    size_type cumulative      = 0;
+    size_type selected_bucket = num_buckets - 1;
+    const size_type target_rank = static_cast<size_type>(clamped_rank);
+
+    for (size_type b = 0; b < num_buckets; ++b) {
+      const size_type count = bucket_counts_h(b);
+      if (target_rank < cumulative + count) {
+        selected_bucket = b;
+        break;
+      }
+      cumulative += count;
+    }
+
+    // Return a conservative lower-bound threshold for the selected bucket.
+    // Bucket 0 lower bound is approximated by the minimum sampled magnitude.
+    // Bucket b>0 lower bound is splitter[b-1].
+    auto sample_values_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), sample_values);
+
+    if (selected_bucket == 0) {
+      return sample_values_h(0);
+    }
+
+    auto splitters_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), splitters);
+    return splitters_h(selected_bucket - 1);
+  }
+
   template <class ValuesType, class ValuesFloatType, class BucketCountsType>
   static float_t threshold_select_dispatch(IlutHandle& ih, const ValuesType& values,
                                            const typename IlutHandle::nnz_lno_t rank, ValuesFloatType& values_f,
-                                           BucketCountsType& bucket_counts) {
-    if (ih.get_threshold_select_algorithm() ==
-        KokkosSparse::Experimental::PAR_ILUT_THRESHOLD_SELECT_APPROX_BUCKET) {
-      return threshold_select_approx_bucket(ih, values, rank, bucket_counts);
-    }
+                                           BucketCountsType& bucket_counts, ValuesFloatType& sample_values,
+                                           ValuesFloatType& splitters) {
+    switch (ih.get_threshold_select_algorithm()) {
+      case KokkosSparse::Experimental::PAR_ILUT_THRESHOLD_SELECT_APPROX_BUCKET:
+        return threshold_select_approx_bucket(ih, values, rank, bucket_counts);
 
-    return threshold_select(values, rank, values_f);
+      case KokkosSparse::Experimental::PAR_ILUT_THRESHOLD_SELECT_APPROX_EQUAL_DETERMINED_TREE:
+        return threshold_select_equal_determined_tree(ih, values, rank, sample_values, splitters, bucket_counts);
+
+      case KokkosSparse::Experimental::PAR_ILUT_THRESHOLD_SELECT_EXACT:
+      default:
+        return threshold_select(values, rank, values_f);
+    }
   }
 
   template <class IRowMapType, class IEntriesType, class IValuesType, class ORowMapType>
@@ -1132,15 +1270,29 @@ struct IlutWrap {
       std::cout << "  res_norm_delta_stop: " << residual_norm_delta_stop << std::endl;
       std::cout << "  async_update:        " << async_update << std::endl;
       std::cout << "  reuse_numeric_pattern: " << reuse_numeric_pattern << std::endl;
-      std::cout << "  threshold_select:    "
-                << (thandle.get_threshold_select_algorithm() ==
-                            KokkosSparse::Experimental::PAR_ILUT_THRESHOLD_SELECT_APPROX_BUCKET
-                        ? "approx_bucket"
-                        : "exact")
-                << std::endl;
+      std::cout << "  threshold_select:    ";
+      switch (thandle.get_threshold_select_algorithm()) {
+        case KokkosSparse::Experimental::PAR_ILUT_THRESHOLD_SELECT_APPROX_BUCKET:
+          std::cout << "approx_bucket";
+          break;
+        case KokkosSparse::Experimental::PAR_ILUT_THRESHOLD_SELECT_APPROX_EQUAL_DETERMINED_TREE:
+          std::cout << "approx_equal_determined_tree";
+          break;
+        case KokkosSparse::Experimental::PAR_ILUT_THRESHOLD_SELECT_EXACT:
+        default:
+          std::cout << "exact";
+          break;
+      }
+      std::cout << std::endl;
       if (thandle.get_threshold_select_algorithm() ==
-          KokkosSparse::Experimental::PAR_ILUT_THRESHOLD_SELECT_APPROX_BUCKET) {
+              KokkosSparse::Experimental::PAR_ILUT_THRESHOLD_SELECT_APPROX_BUCKET ||
+          thandle.get_threshold_select_algorithm() ==
+              KokkosSparse::Experimental::PAR_ILUT_THRESHOLD_SELECT_APPROX_EQUAL_DETERMINED_TREE) {
         std::cout << "  threshold_buckets:   " << thandle.get_threshold_select_num_buckets() << std::endl;
+      }
+      if (thandle.get_threshold_select_algorithm() ==
+          KokkosSparse::Experimental::PAR_ILUT_THRESHOLD_SELECT_APPROX_EQUAL_DETERMINED_TREE) {
+        std::cout << "  threshold_sample:    " << thandle.get_threshold_select_sample_size() << std::endl;
       }
     }
 
@@ -1167,7 +1319,7 @@ struct IlutWrap {
     HandleDeviceRowMapType R_row_map, U_to_Ut_perm, Threshold_bucket_counts;
     HandleDeviceEntriesType LU_entries, L_new_entries, U_new_entries, Ut_new_entries, R_entries;
     HandleDeviceValueType LU_values, L_new_values, U_new_values, Ut_new_values, R_values;
-    HandleDeviceFloatType V_copy;
+    HandleDeviceFloatType V_copy, Threshold_sample_values, Threshold_splitters;
 
     size_type itr                  = 0;
     scalar_t curr_residual         = std::numeric_limits<scalar_t>::max();
@@ -1275,9 +1427,11 @@ struct IlutWrap {
           const auto u_filter_rank = std::max(static_cast<index_t>(0), u_nnz - u_nnz_limit - 1);
 
           const auto l_threshold =
-              threshold_select_dispatch(thandle, L_new_values, l_filter_rank, V_copy, Threshold_bucket_counts);
+              threshold_select_dispatch(thandle, L_new_values, l_filter_rank, V_copy, Threshold_bucket_counts,
+                                        Threshold_sample_values, Threshold_splitters);
           const auto u_threshold =
-              threshold_select_dispatch(thandle, U_new_values, u_filter_rank, V_copy, Threshold_bucket_counts);
+              threshold_select_dispatch(thandle, U_new_values, u_filter_rank, V_copy, Threshold_bucket_counts,
+                                        Threshold_sample_values, Threshold_splitters);
 
           threshold_filter(thandle, l_threshold, L_new_row_map, L_new_entries, L_new_values, L_row_map, L_entries,
                            L_values);
