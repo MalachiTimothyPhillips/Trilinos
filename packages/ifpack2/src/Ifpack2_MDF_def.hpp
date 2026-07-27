@@ -18,6 +18,7 @@
 #include "Ifpack2_Details_getParamTryingTypes.hpp"
 #include "Ifpack2_Details_Behavior.hpp"
 #include "Kokkos_Core.hpp"
+#include "Kokkos_Macros.hpp"
 #include "Kokkos_Sort.hpp"
 #include "KokkosSparse_mdf.hpp"
 #include "KokkosKernels_Sorting.hpp"
@@ -315,6 +316,18 @@ MDF<MatrixType>::getRangeMap() const {
   return L_->getRangeMap();
 }
 
+namespace {
+template <typename MatrixType>
+bool issueWarning([[maybe_unused]] const Teuchos::ParameterList& params) {
+#ifdef Kokkos_ENABLE_SYCL
+  if (!std::is_same_v<typename node_type::execution_space, Kokkos::SYCL>) return false;
+  if (!params.isParameter("trisolver: type")) return false;
+  return params.get<std::string>("trisolver: type").find("KSPTRSV") != std::string::npos;
+#endif
+  return false;
+}
+}  // namespace
+
 template <class MatrixType>
 void MDF<MatrixType>::
     setParameters(const Teuchos::ParameterList& params) {
@@ -352,371 +365,386 @@ void MDF<MatrixType>::
     getParamTryingTypes<double, double>(overalloc, params, paramName, prefix);
   }
 
-  // Forward to trisolvers.
-  L_solver_->setParameters(params);
-  U_solver_->setParameters(params);
+  if (issueWarning(params)) {
+    Teuchos::RCP<Teuchos::FancyOStream> out =
+        Teuchos::VerboseObjectBase::getDefaultOStream();
 
-  // "Commit" the values only after validating all of them.  This
-  // ensures that there are no side effects if this routine throws an
-  // exception.
+    const bool printOnThisRank =
+        A_.is_null() ||
+        A_->getRowMap()->getComm()->getRank() == 0;
 
-  LevelOfFill_ = fillLevel;
-  Overalloc_   = overalloc;
-  Verbosity_   = verbosity;
-}
+    if (printOnThisRank && !out.is_null()) {
+      *out << "Ifpack2::MDF warning: parameter \"trisolver: type\" was set to \""
+           << params.get<std::string>("trisolver: type")
+           << "\" for a SYCL execution space. This configuration may lead to incorrect results."
+           << std::endl;
+    }
 
-template <class MatrixType>
-Teuchos::RCP<const typename MDF<MatrixType>::row_matrix_type>
-MDF<MatrixType>::getMatrix() const {
-  return Teuchos::rcp_implicit_cast<const row_matrix_type>(A_);
-}
+    // Forward to trisolvers.
+    L_solver_->setParameters(params);
+    U_solver_->setParameters(params);
 
-template <class MatrixType>
-Teuchos::RCP<const typename MDF<MatrixType>::crs_matrix_type>
-MDF<MatrixType>::getCrsMatrix() const {
-  return Teuchos::rcp_dynamic_cast<const crs_matrix_type>(A_, true);
-}
+    // "Commit" the values only after validating all of them.  This
+    // ensures that there are no side effects if this routine throws an
+    // exception.
 
-template <class MatrixType>
-Teuchos::RCP<const typename MDF<MatrixType>::row_matrix_type>
-MDF<MatrixType>::makeLocalFilter(const Teuchos::RCP<const row_matrix_type>& A) {
-  using Teuchos::RCP;
-  using Teuchos::rcp;
-  using Teuchos::rcp_dynamic_cast;
-  using Teuchos::rcp_implicit_cast;
-
-  // If A_'s communicator only has one process, or if its column and
-  // row Maps are the same, then it is already local, so use it
-  // directly.
-  if (A->getRowMap()->getComm()->getSize() == 1 ||
-      A->getRowMap()->isSameAs(*(A->getColMap()))) {
-    return A;
+    LevelOfFill_ = fillLevel;
+    Overalloc_   = overalloc;
+    Verbosity_   = verbosity;
   }
 
-  // If A_ is already a LocalFilter, then use it directly.  This
-  // should be the case if MDF is being used through
-  // AdditiveSchwarz, for example.
-  RCP<const LocalFilter<row_matrix_type>> A_lf_r =
-      rcp_dynamic_cast<const LocalFilter<row_matrix_type>>(A);
-  if (!A_lf_r.is_null()) {
-    return rcp_implicit_cast<const row_matrix_type>(A_lf_r);
-  } else {
-    // A_'s communicator has more than one process, its row Map and
-    // its column Map differ, and A_ is not a LocalFilter.  Thus, we
-    // have to wrap it in a LocalFilter.
-    return rcp(new LocalFilter<row_matrix_type>(A));
+  template <class MatrixType>
+  Teuchos::RCP<const typename MDF<MatrixType>::row_matrix_type>
+  MDF<MatrixType>::getMatrix() const {
+    return Teuchos::rcp_implicit_cast<const row_matrix_type>(A_);
   }
-}
 
-template <class MatrixType>
-void MDF<MatrixType>::initialize() {
-  using Teuchos::Array;
-  using Teuchos::ArrayView;
-  using Teuchos::RCP;
-  using Teuchos::rcp;
-  using Teuchos::rcp_const_cast;
-  using Teuchos::rcp_dynamic_cast;
-  using Teuchos::rcp_implicit_cast;
-  const char prefix[] = "Ifpack2::MDF::initialize: ";
+  template <class MatrixType>
+  Teuchos::RCP<const typename MDF<MatrixType>::crs_matrix_type>
+  MDF<MatrixType>::getCrsMatrix() const {
+    return Teuchos::rcp_dynamic_cast<const crs_matrix_type>(A_, true);
+  }
 
-  TEUCHOS_TEST_FOR_EXCEPTION(A_.is_null(), std::runtime_error, prefix << "The matrix is null.  Please "
-                                                                         "call setMatrix() with a nonnull input before calling this method.");
-  TEUCHOS_TEST_FOR_EXCEPTION(!A_->isFillComplete(), std::runtime_error, prefix << "The matrix is not "
-                                                                                  "fill complete.  You may not invoke initialize() or compute() with this "
-                                                                                  "matrix until the matrix is fill complete.  If your matrix is a "
-                                                                                  "Tpetra::CrsMatrix, please call fillComplete on it (with the domain and "
-                                                                                  "range Maps, if appropriate) before calling this method.");
+  template <class MatrixType>
+  Teuchos::RCP<const typename MDF<MatrixType>::row_matrix_type>
+  MDF<MatrixType>::makeLocalFilter(const Teuchos::RCP<const row_matrix_type>& A) {
+    using Teuchos::RCP;
+    using Teuchos::rcp;
+    using Teuchos::rcp_dynamic_cast;
+    using Teuchos::rcp_implicit_cast;
 
-  Teuchos::Time timer("MDF::initialize");
-  double startTime = timer.wallTime();
-  {  // Start timing
+    // If A_'s communicator only has one process, or if its column and
+    // row Maps are the same, then it is already local, so use it
+    // directly.
+    if (A->getRowMap()->getComm()->getSize() == 1 ||
+        A->getRowMap()->isSameAs(*(A->getColMap()))) {
+      return A;
+    }
+
+    // If A_ is already a LocalFilter, then use it directly.  This
+    // should be the case if MDF is being used through
+    // AdditiveSchwarz, for example.
+    RCP<const LocalFilter<row_matrix_type>> A_lf_r =
+        rcp_dynamic_cast<const LocalFilter<row_matrix_type>>(A);
+    if (!A_lf_r.is_null()) {
+      return rcp_implicit_cast<const row_matrix_type>(A_lf_r);
+    } else {
+      // A_'s communicator has more than one process, its row Map and
+      // its column Map differ, and A_ is not a LocalFilter.  Thus, we
+      // have to wrap it in a LocalFilter.
+      return rcp(new LocalFilter<row_matrix_type>(A));
+    }
+  }
+
+  template <class MatrixType>
+  void MDF<MatrixType>::initialize() {
+    using Teuchos::Array;
+    using Teuchos::ArrayView;
+    using Teuchos::RCP;
+    using Teuchos::rcp;
+    using Teuchos::rcp_const_cast;
+    using Teuchos::rcp_dynamic_cast;
+    using Teuchos::rcp_implicit_cast;
+    const char prefix[] = "Ifpack2::MDF::initialize: ";
+
+    TEUCHOS_TEST_FOR_EXCEPTION(A_.is_null(), std::runtime_error, prefix << "The matrix is null.  Please "
+                                                                           "call setMatrix() with a nonnull input before calling this method.");
+    TEUCHOS_TEST_FOR_EXCEPTION(!A_->isFillComplete(), std::runtime_error, prefix << "The matrix is not "
+                                                                                    "fill complete.  You may not invoke initialize() or compute() with this "
+                                                                                    "matrix until the matrix is fill complete.  If your matrix is a "
+                                                                                    "Tpetra::CrsMatrix, please call fillComplete on it (with the domain and "
+                                                                                    "range Maps, if appropriate) before calling this method.");
+
+    Teuchos::Time timer("MDF::initialize");
+    double startTime = timer.wallTime();
+    {  // Start timing
+      Teuchos::TimeMonitor timeMon(timer);
+
+      // Calling initialize() means that the user asserts that the graph
+      // of the sparse matrix may have changed.  We must not just reuse
+      // the previous graph in that case.
+      //
+      // Regarding setting isAllocated_ to false: Eventually, we may want
+      // some kind of clever memory reuse strategy, but it's always
+      // correct just to blow everything away and start over.
+      isInitialized_ = false;
+      isAllocated_   = false;
+      isComputed_    = false;
+      MDF_handle_    = Teuchos::null;
+
+      A_local_ = makeLocalFilter(A_);
+      TEUCHOS_TEST_FOR_EXCEPTION(
+          A_local_.is_null(), std::logic_error,
+          "Ifpack2::MDF::initialize: "
+          "makeLocalFilter returned null; it failed to compute A_local.  "
+          "Please report this bug to the Ifpack2 developers.");
+
+      // FIXME (mfh 24 Jan 2014, 26 Mar 2014) It would be more efficient
+      // to rewrite MDF so that it works with any RowMatrix input, not
+      // just CrsMatrix.  (That would require rewriting mdfGraph to
+      // handle a Tpetra::RowGraph.)  However, to make it work for now,
+      // we just copy the input matrix if it's not a CrsMatrix.
+      {
+        RCP<const crs_matrix_type> A_local_crs = Details::MDFImpl::get_local_crs_row_matrix(A_local_);
+
+        auto A_local_device = A_local_crs->getLocalMatrixDevice();
+        MDF_handle_         = rcp(new MDF_handle_device_type(A_local_device));
+        MDF_handle_->set_verbosity(Verbosity_);
+
+        KokkosSparse::Experimental::mdf_symbolic(A_local_device, *MDF_handle_);
+
+        isAllocated_ = true;
+      }
+
+      checkOrderingConsistency(*A_local_);
+    }  // Stop timing
+
+    isInitialized_ = true;
+    ++numInitialize_;
+    initializeTime_ += (timer.wallTime() - startTime);
+  }
+
+  template <class MatrixType>
+  void MDF<MatrixType>::
+      checkOrderingConsistency(const row_matrix_type& A) {
+    // First check that the local row map ordering is the same as the local portion of the column map.
+    // The extraction of the strictly lower/upper parts of A, as well as the factorization,
+    // implicitly assume that this is the case.
+    Teuchos::ArrayView<const global_ordinal_type> rowGIDs = A.getRowMap()->getLocalElementList();
+    Teuchos::ArrayView<const global_ordinal_type> colGIDs = A.getColMap()->getLocalElementList();
+    bool gidsAreConsistentlyOrdered                       = true;
+    global_ordinal_type indexOfInconsistentGID            = 0;
+    for (global_ordinal_type i = 0; i < rowGIDs.size(); ++i) {
+      if (rowGIDs[i] != colGIDs[i]) {
+        gidsAreConsistentlyOrdered = false;
+        indexOfInconsistentGID     = i;
+        break;
+      }
+    }
+    TEUCHOS_TEST_FOR_EXCEPTION(gidsAreConsistentlyOrdered == false, std::runtime_error,
+                               "The ordering of the local GIDs in the row and column maps is not the same"
+                                   << std::endl
+                                   << "at index " << indexOfInconsistentGID
+                                   << ".  Consistency is required, as all calculations are done with"
+                                   << std::endl
+                                   << "local indexing.");
+  }
+
+  template <class MatrixType>
+  void MDF<MatrixType>::compute() {
+    using Teuchos::Array;
+    using Teuchos::ArrayView;
+    using Teuchos::RCP;
+    using Teuchos::rcp;
+    using Teuchos::rcp_const_cast;
+    using Teuchos::rcp_dynamic_cast;
+    const char prefix[] = "Ifpack2::MDF::compute: ";
+
+    // initialize() checks this too, but it's easier for users if the
+    // error shows them the name of the method that they actually
+    // called, rather than the name of some internally called method.
+    TEUCHOS_TEST_FOR_EXCEPTION(A_.is_null(), std::runtime_error, prefix << "The matrix is null.  Please "
+                                                                           "call setMatrix() with a nonnull input before calling this method.");
+    TEUCHOS_TEST_FOR_EXCEPTION(!A_->isFillComplete(), std::runtime_error, prefix << "The matrix is not "
+                                                                                    "fill complete.  You may not invoke initialize() or compute() with this "
+                                                                                    "matrix until the matrix is fill complete.  If your matrix is a "
+                                                                                    "Tpetra::CrsMatrix, please call fillComplete on it (with the domain and "
+                                                                                    "range Maps, if appropriate) before calling this method.");
+
+    if (!isInitialized()) {
+      initialize();  // Don't count this in the compute() time
+    }
+
+    Teuchos::Time timer("MDF::compute");
+
+    // Start timing
     Teuchos::TimeMonitor timeMon(timer);
+    double startTime = timer.wallTime();
 
-    // Calling initialize() means that the user asserts that the graph
-    // of the sparse matrix may have changed.  We must not just reuse
-    // the previous graph in that case.
-    //
-    // Regarding setting isAllocated_ to false: Eventually, we may want
-    // some kind of clever memory reuse strategy, but it's always
-    // correct just to blow everything away and start over.
-    isInitialized_ = false;
-    isAllocated_   = false;
-    isComputed_    = false;
-    MDF_handle_    = Teuchos::null;
+    isComputed_ = false;
 
-    A_local_ = makeLocalFilter(A_);
-    TEUCHOS_TEST_FOR_EXCEPTION(
-        A_local_.is_null(), std::logic_error,
-        "Ifpack2::MDF::initialize: "
-        "makeLocalFilter returned null; it failed to compute A_local.  "
-        "Please report this bug to the Ifpack2 developers.");
-
-    // FIXME (mfh 24 Jan 2014, 26 Mar 2014) It would be more efficient
-    // to rewrite MDF so that it works with any RowMatrix input, not
-    // just CrsMatrix.  (That would require rewriting mdfGraph to
-    // handle a Tpetra::RowGraph.)  However, to make it work for now,
-    // we just copy the input matrix if it's not a CrsMatrix.
-    {
+    {  // Make sure values in A is picked up even in case of pattern reuse
       RCP<const crs_matrix_type> A_local_crs = Details::MDFImpl::get_local_crs_row_matrix(A_local_);
 
+      // Compute the ordering and factorize
       auto A_local_device = A_local_crs->getLocalMatrixDevice();
-      MDF_handle_         = rcp(new MDF_handle_device_type(A_local_device));
-      MDF_handle_->set_verbosity(Verbosity_);
 
-      KokkosSparse::Experimental::mdf_symbolic(A_local_device, *MDF_handle_);
-
-      isAllocated_ = true;
+      KokkosSparse::Experimental::mdf_numeric(A_local_device, *MDF_handle_);
     }
 
-    checkOrderingConsistency(*A_local_);
-  }  // Stop timing
+    // Ordering convention for MDF impl and here are reversed. Do reverse here to avoid confusion
+    Details::MDFImpl::copy_dev_view_to_host_array(reversePermutations_, MDF_handle_->permutation);
+    Details::MDFImpl::copy_dev_view_to_host_array(permutations_, MDF_handle_->permutation_inv);
 
-  isInitialized_ = true;
-  ++numInitialize_;
-  initializeTime_ += (timer.wallTime() - startTime);
-}
-
-template <class MatrixType>
-void MDF<MatrixType>::
-    checkOrderingConsistency(const row_matrix_type& A) {
-  // First check that the local row map ordering is the same as the local portion of the column map.
-  // The extraction of the strictly lower/upper parts of A, as well as the factorization,
-  // implicitly assume that this is the case.
-  Teuchos::ArrayView<const global_ordinal_type> rowGIDs = A.getRowMap()->getLocalElementList();
-  Teuchos::ArrayView<const global_ordinal_type> colGIDs = A.getColMap()->getLocalElementList();
-  bool gidsAreConsistentlyOrdered                       = true;
-  global_ordinal_type indexOfInconsistentGID            = 0;
-  for (global_ordinal_type i = 0; i < rowGIDs.size(); ++i) {
-    if (rowGIDs[i] != colGIDs[i]) {
-      gidsAreConsistentlyOrdered = false;
-      indexOfInconsistentGID     = i;
-      break;
+    // TMR: Need to COPY the values held by the MDF handle because the CRS matrix needs to
+    // exclusively own them and the MDF_handles use_count contribution throws that off
+    {
+      auto L_mdf = MDF_handle_->getL();
+      L_         = rcp(new crs_matrix_type(
+                  A_local_->getRowMap(),
+                  A_local_->getColMap(),
+                  Details::MDFImpl::copy_view(L_mdf.graph.row_map),
+                  Details::MDFImpl::copy_view(L_mdf.graph.entries),
+                  Details::MDFImpl::copy_view(L_mdf.values)));
     }
-  }
-  TEUCHOS_TEST_FOR_EXCEPTION(gidsAreConsistentlyOrdered == false, std::runtime_error,
-                             "The ordering of the local GIDs in the row and column maps is not the same"
-                                 << std::endl
-                                 << "at index " << indexOfInconsistentGID
-                                 << ".  Consistency is required, as all calculations are done with"
-                                 << std::endl
-                                 << "local indexing.");
-}
-
-template <class MatrixType>
-void MDF<MatrixType>::compute() {
-  using Teuchos::Array;
-  using Teuchos::ArrayView;
-  using Teuchos::RCP;
-  using Teuchos::rcp;
-  using Teuchos::rcp_const_cast;
-  using Teuchos::rcp_dynamic_cast;
-  const char prefix[] = "Ifpack2::MDF::compute: ";
-
-  // initialize() checks this too, but it's easier for users if the
-  // error shows them the name of the method that they actually
-  // called, rather than the name of some internally called method.
-  TEUCHOS_TEST_FOR_EXCEPTION(A_.is_null(), std::runtime_error, prefix << "The matrix is null.  Please "
-                                                                         "call setMatrix() with a nonnull input before calling this method.");
-  TEUCHOS_TEST_FOR_EXCEPTION(!A_->isFillComplete(), std::runtime_error, prefix << "The matrix is not "
-                                                                                  "fill complete.  You may not invoke initialize() or compute() with this "
-                                                                                  "matrix until the matrix is fill complete.  If your matrix is a "
-                                                                                  "Tpetra::CrsMatrix, please call fillComplete on it (with the domain and "
-                                                                                  "range Maps, if appropriate) before calling this method.");
-
-  if (!isInitialized()) {
-    initialize();  // Don't count this in the compute() time
-  }
-
-  Teuchos::Time timer("MDF::compute");
-
-  // Start timing
-  Teuchos::TimeMonitor timeMon(timer);
-  double startTime = timer.wallTime();
-
-  isComputed_ = false;
-
-  {  // Make sure values in A is picked up even in case of pattern reuse
-    RCP<const crs_matrix_type> A_local_crs = Details::MDFImpl::get_local_crs_row_matrix(A_local_);
-
-    // Compute the ordering and factorize
-    auto A_local_device = A_local_crs->getLocalMatrixDevice();
-
-    KokkosSparse::Experimental::mdf_numeric(A_local_device, *MDF_handle_);
-  }
-
-  // Ordering convention for MDF impl and here are reversed. Do reverse here to avoid confusion
-  Details::MDFImpl::copy_dev_view_to_host_array(reversePermutations_, MDF_handle_->permutation);
-  Details::MDFImpl::copy_dev_view_to_host_array(permutations_, MDF_handle_->permutation_inv);
-
-  // TMR: Need to COPY the values held by the MDF handle because the CRS matrix needs to
-  // exclusively own them and the MDF_handles use_count contribution throws that off
-  {
-    auto L_mdf = MDF_handle_->getL();
-    L_         = rcp(new crs_matrix_type(
-                A_local_->getRowMap(),
-                A_local_->getColMap(),
-                Details::MDFImpl::copy_view(L_mdf.graph.row_map),
-                Details::MDFImpl::copy_view(L_mdf.graph.entries),
-                Details::MDFImpl::copy_view(L_mdf.values)));
-  }
-  {
-    auto U_mdf = MDF_handle_->getU();
-    U_         = rcp(new crs_matrix_type(
-                A_local_->getRowMap(),
-                A_local_->getColMap(),
-                Details::MDFImpl::copy_view(U_mdf.graph.row_map),
-                Details::MDFImpl::copy_view(U_mdf.graph.entries),
-                Details::MDFImpl::copy_view(U_mdf.values)));
-  }
-  L_->fillComplete();
-  U_->fillComplete();
-  L_solver_->setMatrix(L_);
-  L_solver_->initialize();
-  L_solver_->compute();
-  U_solver_->setMatrix(U_);
-  U_solver_->initialize();
-  U_solver_->compute();
-
-  isComputed_ = true;
-  ++numCompute_;
-  computeTime_ += (timer.wallTime() - startTime);
-}
-
-template <class MatrixType>
-void MDF<MatrixType>::
-    apply_impl(const Tpetra::MultiVector<scalar_type, local_ordinal_type, global_ordinal_type, node_type>& X,
-               Tpetra::MultiVector<scalar_type, local_ordinal_type, global_ordinal_type, node_type>& Y,
-               Teuchos::ETransp mode,
-               scalar_type alpha,
-               scalar_type beta) const {
-  const scalar_type one  = STS::one();
-  const scalar_type zero = STS::zero();
-
-  if (alpha == one && beta == zero) {
-    MV tmp(Y.getMap(), Y.getNumVectors());
-    Details::MDFImpl::applyReorderingPermutations(X, tmp, permutations_);
-    if (mode == Teuchos::NO_TRANS) {  // Solve L (D (U Y)) = X for Y.
-      // Start by solving L Y = X for Y.
-      L_solver_->apply(tmp, Y, mode);
-      U_solver_->apply(Y, tmp, mode);  // Solve U Y = Y.
-    } else {                           // Solve U^P (D^P (L^P Y)) = X for Y (where P is * or T).
-      // Start by solving U^P Y = X for Y.
-      U_solver_->apply(tmp, Y, mode);
-      L_solver_->apply(Y, tmp, mode);  // Solve L^P Y = Y.
+    {
+      auto U_mdf = MDF_handle_->getU();
+      U_         = rcp(new crs_matrix_type(
+                  A_local_->getRowMap(),
+                  A_local_->getColMap(),
+                  Details::MDFImpl::copy_view(U_mdf.graph.row_map),
+                  Details::MDFImpl::copy_view(U_mdf.graph.entries),
+                  Details::MDFImpl::copy_view(U_mdf.values)));
     }
-    Details::MDFImpl::applyReorderingPermutations(tmp, Y, reversePermutations_);
-  } else {  // alpha != 1 or beta != 0
-    if (alpha == zero) {
-      // The special case for beta == 0 ensures that if Y contains Inf
-      // or NaN values, we replace them with 0 (following BLAS
-      // convention), rather than multiplying them by 0 to get NaN.
-      if (beta == zero) {
-        Y.putScalar(zero);
-      } else {
-        Y.scale(beta);
+    L_->fillComplete();
+    U_->fillComplete();
+    L_solver_->setMatrix(L_);
+    L_solver_->initialize();
+    L_solver_->compute();
+    U_solver_->setMatrix(U_);
+    U_solver_->initialize();
+    U_solver_->compute();
+
+    isComputed_ = true;
+    ++numCompute_;
+    computeTime_ += (timer.wallTime() - startTime);
+  }
+
+  template <class MatrixType>
+  void MDF<MatrixType>::
+      apply_impl(const Tpetra::MultiVector<scalar_type, local_ordinal_type, global_ordinal_type, node_type>& X,
+                 Tpetra::MultiVector<scalar_type, local_ordinal_type, global_ordinal_type, node_type>& Y,
+                 Teuchos::ETransp mode,
+                 scalar_type alpha,
+                 scalar_type beta) const {
+    const scalar_type one  = STS::one();
+    const scalar_type zero = STS::zero();
+
+    if (alpha == one && beta == zero) {
+      MV tmp(Y.getMap(), Y.getNumVectors());
+      Details::MDFImpl::applyReorderingPermutations(X, tmp, permutations_);
+      if (mode == Teuchos::NO_TRANS) {  // Solve L (D (U Y)) = X for Y.
+        // Start by solving L Y = X for Y.
+        L_solver_->apply(tmp, Y, mode);
+        U_solver_->apply(Y, tmp, mode);  // Solve U Y = Y.
+      } else {                           // Solve U^P (D^P (L^P Y)) = X for Y (where P is * or T).
+        // Start by solving U^P Y = X for Y.
+        U_solver_->apply(tmp, Y, mode);
+        L_solver_->apply(Y, tmp, mode);  // Solve L^P Y = Y.
       }
-    } else {  // alpha != zero
-      MV Y_tmp(Y.getMap(), Y.getNumVectors());
-      apply_impl(X, Y_tmp, mode);
-      Y.update(alpha, Y_tmp, beta);
-    }
-  }
-}
-
-template <class MatrixType>
-void MDF<MatrixType>::
-    apply(const Tpetra::MultiVector<scalar_type, local_ordinal_type, global_ordinal_type, node_type>& X,
-          Tpetra::MultiVector<scalar_type, local_ordinal_type, global_ordinal_type, node_type>& Y,
-          Teuchos::ETransp mode,
-          scalar_type alpha,
-          scalar_type beta) const {
-  using Teuchos::RCP;
-  using Teuchos::rcpFromRef;
-
-  TEUCHOS_TEST_FOR_EXCEPTION(
-      A_.is_null(), std::runtime_error,
-      "Ifpack2::MDF::apply: The matrix is "
-      "null.  Please call setMatrix() with a nonnull input, then initialize() "
-      "and compute(), before calling this method.");
-  TEUCHOS_TEST_FOR_EXCEPTION(
-      !isComputed(), std::runtime_error,
-      "Ifpack2::MDF::apply: If you have not yet called compute(), "
-      "you must call compute() before calling this method.");
-  TEUCHOS_TEST_FOR_EXCEPTION(
-      X.getNumVectors() != Y.getNumVectors(), std::invalid_argument,
-      "Ifpack2::MDF::apply: X and Y do not have the same number of columns.  "
-      "X.getNumVectors() = "
-          << X.getNumVectors()
-          << " != Y.getNumVectors() = " << Y.getNumVectors() << ".");
-  TEUCHOS_TEST_FOR_EXCEPTION(
-      STS::isComplex && mode == Teuchos::CONJ_TRANS, std::logic_error,
-      "Ifpack2::MDF::apply: mode = Teuchos::CONJ_TRANS is not implemented for "
-      "complex Scalar type.  Please talk to the Ifpack2 developers to get this "
-      "fixed.  There is a FIXME in this file about this very issue.");
-  if (Ifpack2::Details::Behavior::debug()) {
-    Teuchos::Array<magnitude_type> norms(X.getNumVectors());
-    X.norm1(norms());
-    bool good = true;
-    for (size_t j = 0; j < X.getNumVectors(); ++j) {
-      if (STM::isnaninf(norms[j])) {
-        good = false;
-        break;
+      Details::MDFImpl::applyReorderingPermutations(tmp, Y, reversePermutations_);
+    } else {  // alpha != 1 or beta != 0
+      if (alpha == zero) {
+        // The special case for beta == 0 ensures that if Y contains Inf
+        // or NaN values, we replace them with 0 (following BLAS
+        // convention), rather than multiplying them by 0 to get NaN.
+        if (beta == zero) {
+          Y.putScalar(zero);
+        } else {
+          Y.scale(beta);
+        }
+      } else {  // alpha != zero
+        MV Y_tmp(Y.getMap(), Y.getNumVectors());
+        apply_impl(X, Y_tmp, mode);
+        Y.update(alpha, Y_tmp, beta);
       }
     }
-    TEUCHOS_TEST_FOR_EXCEPTION(!good, std::runtime_error, "Ifpack2::MDF::apply: The 1-norm of the input X is NaN or Inf.");
   }
 
-  Teuchos::Time timer("MDF::apply");
-  double startTime = timer.wallTime();
-  {  // Start timing
-    Teuchos::TimeMonitor timeMon(timer);
-    apply_impl(X, Y, mode, alpha, beta);
-  }  // end timing
+  template <class MatrixType>
+  void MDF<MatrixType>::
+      apply(const Tpetra::MultiVector<scalar_type, local_ordinal_type, global_ordinal_type, node_type>& X,
+            Tpetra::MultiVector<scalar_type, local_ordinal_type, global_ordinal_type, node_type>& Y,
+            Teuchos::ETransp mode,
+            scalar_type alpha,
+            scalar_type beta) const {
+    using Teuchos::RCP;
+    using Teuchos::rcpFromRef;
 
-  if (Ifpack2::Details::Behavior::debug()) {
-    Teuchos::Array<magnitude_type> norms(Y.getNumVectors());
-    Y.norm1(norms());
-    bool good = true;
-    for (size_t j = 0; j < Y.getNumVectors(); ++j) {
-      if (STM::isnaninf(norms[j])) {
-        good = false;
-        break;
+    TEUCHOS_TEST_FOR_EXCEPTION(
+        A_.is_null(), std::runtime_error,
+        "Ifpack2::MDF::apply: The matrix is "
+        "null.  Please call setMatrix() with a nonnull input, then initialize() "
+        "and compute(), before calling this method.");
+    TEUCHOS_TEST_FOR_EXCEPTION(
+        !isComputed(), std::runtime_error,
+        "Ifpack2::MDF::apply: If you have not yet called compute(), "
+        "you must call compute() before calling this method.");
+    TEUCHOS_TEST_FOR_EXCEPTION(
+        X.getNumVectors() != Y.getNumVectors(), std::invalid_argument,
+        "Ifpack2::MDF::apply: X and Y do not have the same number of columns.  "
+        "X.getNumVectors() = "
+            << X.getNumVectors()
+            << " != Y.getNumVectors() = " << Y.getNumVectors() << ".");
+    TEUCHOS_TEST_FOR_EXCEPTION(
+        STS::isComplex && mode == Teuchos::CONJ_TRANS, std::logic_error,
+        "Ifpack2::MDF::apply: mode = Teuchos::CONJ_TRANS is not implemented for "
+        "complex Scalar type.  Please talk to the Ifpack2 developers to get this "
+        "fixed.  There is a FIXME in this file about this very issue.");
+    if (Ifpack2::Details::Behavior::debug()) {
+      Teuchos::Array<magnitude_type> norms(X.getNumVectors());
+      X.norm1(norms());
+      bool good = true;
+      for (size_t j = 0; j < X.getNumVectors(); ++j) {
+        if (STM::isnaninf(norms[j])) {
+          good = false;
+          break;
+        }
       }
+      TEUCHOS_TEST_FOR_EXCEPTION(!good, std::runtime_error, "Ifpack2::MDF::apply: The 1-norm of the input X is NaN or Inf.");
     }
-    TEUCHOS_TEST_FOR_EXCEPTION(!good, std::runtime_error, "Ifpack2::MDF::apply: The 1-norm of the output Y is NaN or Inf.");
+
+    Teuchos::Time timer("MDF::apply");
+    double startTime = timer.wallTime();
+    {  // Start timing
+      Teuchos::TimeMonitor timeMon(timer);
+      apply_impl(X, Y, mode, alpha, beta);
+    }  // end timing
+
+    if (Ifpack2::Details::Behavior::debug()) {
+      Teuchos::Array<magnitude_type> norms(Y.getNumVectors());
+      Y.norm1(norms());
+      bool good = true;
+      for (size_t j = 0; j < Y.getNumVectors(); ++j) {
+        if (STM::isnaninf(norms[j])) {
+          good = false;
+          break;
+        }
+      }
+      TEUCHOS_TEST_FOR_EXCEPTION(!good, std::runtime_error, "Ifpack2::MDF::apply: The 1-norm of the output Y is NaN or Inf.");
+    }
+
+    ++numApply_;
+    applyTime_ += (timer.wallTime() - startTime);
   }
 
-  ++numApply_;
-  applyTime_ += (timer.wallTime() - startTime);
-}
+  template <class MatrixType>
+  std::string MDF<MatrixType>::description() const {
+    std::ostringstream os;
 
-template <class MatrixType>
-std::string MDF<MatrixType>::description() const {
-  std::ostringstream os;
+    // Output is a valid YAML dictionary in flow style.  If you don't
+    // like everything on a single line, you should call describe()
+    // instead.
+    os << "\"Ifpack2::MDF\": {";
+    os << "Initialized: " << (isInitialized() ? "true" : "false") << ", "
+       << "Computed: " << (isComputed() ? "true" : "false") << ", ";
 
-  // Output is a valid YAML dictionary in flow style.  If you don't
-  // like everything on a single line, you should call describe()
-  // instead.
-  os << "\"Ifpack2::MDF\": {";
-  os << "Initialized: " << (isInitialized() ? "true" : "false") << ", "
-     << "Computed: " << (isComputed() ? "true" : "false") << ", ";
+    os << "Level-of-fill: " << getLevelOfFill() << ", ";
 
-  os << "Level-of-fill: " << getLevelOfFill() << ", ";
+    if (A_.is_null()) {
+      os << "Matrix: null";
+    } else {
+      os << "Global matrix dimensions: ["
+         << A_->getGlobalNumRows() << ", " << A_->getGlobalNumCols() << "]"
+         << ", Global nnz: " << A_->getGlobalNumEntries();
+    }
 
-  if (A_.is_null()) {
-    os << "Matrix: null";
-  } else {
-    os << "Global matrix dimensions: ["
-       << A_->getGlobalNumRows() << ", " << A_->getGlobalNumCols() << "]"
-       << ", Global nnz: " << A_->getGlobalNumEntries();
+    if (!L_solver_.is_null()) os << ", " << L_solver_->description();
+    if (!U_solver_.is_null()) os << ", " << U_solver_->description();
+
+    os << "}";
+    return os.str();
   }
-
-  if (!L_solver_.is_null()) os << ", " << L_solver_->description();
-  if (!U_solver_.is_null()) os << ", " << U_solver_->description();
-
-  os << "}";
-  return os.str();
-}
 
 }  // namespace Ifpack2
 
