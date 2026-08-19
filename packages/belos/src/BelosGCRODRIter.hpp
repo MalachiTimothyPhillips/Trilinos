@@ -16,6 +16,7 @@
 
 #include "BelosConfigDefs.hpp"
 #include "BelosTypes.hpp"
+#include "BelosGCRODRIteration.hpp"
 
 #include "BelosLinearProblem.hpp"
 #include "BelosMatOrthoManager.hpp"
@@ -62,6 +63,9 @@ namespace Belos {
     
     /*! \brief The current Krylov basis. */
     Teuchos::RCP<MV> V;
+
+    /*! \brief Optional flexible correction basis. Used by FGCRODRIter. */
+    Teuchos::RCP<MV> Z;
    
     /*! \brief The recycled subspace and its projection. */
     Teuchos::RCP<MV> U, C;
@@ -77,7 +81,7 @@ namespace Belos {
      */
     Teuchos::RCP<Teuchos::SerialDenseMatrix<int,ScalarType> > B;
 
-    GCRODRIterState() : curDim(0), V(Teuchos::null), 
+    GCRODRIterState() : curDim(0), V(Teuchos::null), Z(Teuchos::null), 
 			U(Teuchos::null), C(Teuchos::null),
 			H(Teuchos::null), B(Teuchos::null)
     {}
@@ -119,7 +123,7 @@ namespace Belos {
   
   
   template<class ScalarType, class MV, class OP>
-  class GCRODRIter : virtual public Iteration<ScalarType,MV,OP> {
+  class GCRODRIter : virtual public GCRODRIteration<ScalarType,MV,OP> {
     
   public:
     
@@ -221,6 +225,7 @@ namespace Belos {
       GCRODRIterState<ScalarType,MV> state;
       state.curDim = curDim_;
       state.V = V_;
+      state.Z = Teuchos::null;
       state.U = U_;
       state.C = C_;
       state.H = H_;
