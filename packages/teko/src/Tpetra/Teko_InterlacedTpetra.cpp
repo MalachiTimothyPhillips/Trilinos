@@ -9,6 +9,8 @@
 
 #include "Teko_InterlacedTpetra.hpp"
 #include "Tpetra_Import.hpp"
+#include "Tpetra_Details_makeColMap_decl.hpp"
+#include "KokkosSparse_SortCrs.hpp"
 
 #include <vector>
 
@@ -187,11 +189,12 @@ RCP<Tpetra::CrsMatrix<ST, LO, GO, NT> > buildSubBlock(
   TEUCHOS_ASSERT(j >= 0 && j < numVarFamily);
 
   const Tpetra::Map<LO, GO, NT>& gRowMap = *subMaps[i].second;
-  const Tpetra::Map<LO, GO, NT>& rowMap =
-      *Teuchos::get_extra_data<RCP<Tpetra::Map<LO, GO, NT> > >(subMaps[i].second, "contigMap");
-  const Tpetra::Map<LO, GO, NT>& colMap =
-      *Teuchos::get_extra_data<RCP<Tpetra::Map<LO, GO, NT> > >(subMaps[j].second, "contigMap");
-  int colFamilyCnt = subMaps[j].first;
+  const RCP<const Tpetra::Map<LO, GO, NT> > rowMap =
+      Teuchos::get_extra_data<RCP<Tpetra::Map<LO, GO, NT> > >(subMaps[i].second, "contigMap");
+  const RCP<const Tpetra::Map<LO, GO, NT> > domainMap =
+      Teuchos::get_extra_data<RCP<Tpetra::Map<LO, GO, NT> > >(subMaps[j].second, "contigMap");
+  const RCP<const Tpetra::Map<LO, GO, NT> > rangeMap = rowMap;
+  GO colFamilyCnt                                    = subMaps[j].first;
 
   // compute the number of global variables
   // and the row and column block offset
@@ -206,112 +209,115 @@ RCP<Tpetra::CrsMatrix<ST, LO, GO, NT> > buildSubBlock(
     if (k < j) colBlockOffset += subMaps[k].first;
   }
 
-  // copy all global rows to here
-  Tpetra::Import<LO, GO, NT> import(A->getRowMap(), rcpFromRef(gRowMap));
-  Tpetra::CrsMatrix<ST, LO, GO, NT> localA(rcpFromRef(gRowMap), 0);
-  localA.doImport(*A, import, Tpetra::INSERT);
+  // Build the sub-block on the device, mirroring the Blocking path.
+  //
+  // The sub-block's rows are a subset of A's rows owned by this same process,
+  // so we read A's local device matrix directly (mapping sub-block global row
+  // -> A local row) instead of importing all rows into a temporary CrsMatrix.
+  // The interlaced column-membership test and contiguous-column renumbering
+  // are pure arithmetic, so the entire extraction runs on the device with no
+  // host<->device transfers and no host-side insertGlobalValues loop.
+  LO numMyRows = rowMap->getLocalNumElements();
 
-  // get entry information
-  LO numMyRows     = rowMap.getLocalNumElements();
-  LO maxNumEntries = A->getGlobalMaxNumRowEntries();
+  using local_matrix_type      = Tpetra::CrsMatrix<ST, LO, GO, NT>::local_matrix_device_type;
+  using row_map_type           = local_matrix_type::row_map_type::non_const_type;
+  using values_type            = local_matrix_type::values_type::non_const_type;
+  using index_type             = local_matrix_type::index_type::non_const_type;
+  using matrix_execution_space = typename local_matrix_type::execution_space;
+  using device_type            = typename NT::device_type;
 
-  // for extraction
-  auto indices = typename Tpetra::CrsMatrix<ST, LO, GO, NT>::nonconst_global_inds_host_view_type(
-      Kokkos::ViewAllocateWithoutInitializing("rowIndices"), maxNumEntries);
-  auto values = typename Tpetra::CrsMatrix<ST, LO, GO, NT>::nonconst_values_host_view_type(
-      Kokkos::ViewAllocateWithoutInitializing("rowIndices"), maxNumEntries);
+  auto A_dev        = A->getLocalMatrixDevice();
+  auto gRowMap_dev  = gRowMap.getLocalMap();
+  auto A_rowmap_dev = A->getRowMap()->getLocalMap();
+  auto A_colmap_dev = A->getColMap()->getLocalMap();
 
-  // for counting row sizes
-  std::vector<size_t> numEntriesPerRow(numMyRows, 0);
+  // Count the entries owned by this sub-block in each row and build the
+  // row-pointer prefix sum in a single scan.
+  auto prefixSumEntriesPerRow = row_map_type(
+      Kokkos::ViewAllocateWithoutInitializing("prefixSumEntriesPerRow"), numMyRows + 1);
 
-  const size_t invalid = Teuchos::OrdinalTraits<size_t>::invalid();
+  LO totalNumOwnedCols = 0;
+  Kokkos::parallel_scan(
+      Kokkos::RangePolicy<Kokkos::Schedule<Kokkos::Dynamic>, matrix_execution_space>(0, numMyRows),
+      KOKKOS_LAMBDA(const LO localRow, LO& sumNumEntries, bool finalPass) {
+        GO globalRow             = gRowMap_dev.getGlobalElement(localRow);
+        LO lid                   = A_rowmap_dev.getLocalElement(globalRow);
+        const auto sparseRowView = A_dev.row(lid);
 
-  // Count the sizes of each row, using same logic as insertion below
-  for (LO localRow = 0; localRow < numMyRows; localRow++) {
-    size_t numEntries = invalid;
-    GO globalRow      = gRowMap.getGlobalElement(localRow);
-    GO contigRow      = rowMap.getGlobalElement(localRow);
+        LO numOwnedCols = 0;
+        for (auto localCol = 0; localCol < sparseRowView.length; localCol++) {
+          GO globalCol  = A_colmap_dev.getGlobalElement(sparseRowView.colidx(localCol));
+          GO block      = globalCol / numGlobalVars;
+          bool inFamily = (block * numGlobalVars + colBlockOffset <= globalCol) &&
+                          ((block * numGlobalVars + colBlockOffset + colFamilyCnt) > globalCol);
+          if (inFamily) numOwnedCols++;
+        }
 
-    TEUCHOS_ASSERT(globalRow >= 0);
-    TEUCHOS_ASSERT(contigRow >= 0);
+        if (finalPass) {
+          prefixSumEntriesPerRow(localRow) = sumNumEntries;
+          if (localRow == (numMyRows - 1))
+            prefixSumEntriesPerRow(numMyRows) = sumNumEntries + numOwnedCols;
+        }
+        sumNumEntries += numOwnedCols;
+      },
+      totalNumOwnedCols);
 
-    // extract a global row copy
-    localA.getGlobalRowCopy(globalRow, indices, values, numEntries);
-    LO numOwnedCols = 0;
-    for (size_t localCol = 0; localCol < numEntries; localCol++) {
-      GO globalCol = indices(localCol);
+  auto columnIndices = Kokkos::View<GO*, device_type>(
+      Kokkos::ViewAllocateWithoutInitializing("columnIndices"), totalNumOwnedCols);
+  auto values = values_type(Kokkos::ViewAllocateWithoutInitializing("values"), totalNumOwnedCols);
 
-      // determinate which block this column ID is in
-      int block = globalCol / numGlobalVars;
+  // Extract the contiguous column GIDs and values for each row.
+  LO maxNumEntriesSubblock = 0;
+  Kokkos::parallel_reduce(
+      Kokkos::RangePolicy<Kokkos::Schedule<Kokkos::Dynamic>, matrix_execution_space>(0, numMyRows),
+      KOKKOS_LAMBDA(const LO localRow, LO& maxNumEntries) {
+        GO globalRow             = gRowMap_dev.getGlobalElement(localRow);
+        LO lid                   = A_rowmap_dev.getLocalElement(globalRow);
+        const auto sparseRowView = A_dev.row(lid);
 
-      bool inFamily = true;
+        LO colId      = 0;
+        LO colIdStart = prefixSumEntriesPerRow[localRow];
+        for (auto localCol = 0; localCol < sparseRowView.length; localCol++) {
+          GO globalCol  = A_colmap_dev.getGlobalElement(sparseRowView.colidx(localCol));
+          GO block      = globalCol / numGlobalVars;
+          bool inFamily = (block * numGlobalVars + colBlockOffset <= globalCol) &&
+                          ((block * numGlobalVars + colBlockOffset + colFamilyCnt) > globalCol);
+          if (!inFamily) continue;
 
-      // test the beginning of the block
-      inFamily &= (block * numGlobalVars + colBlockOffset <= globalCol);
-      inFamily &= ((block * numGlobalVars + colBlockOffset + colFamilyCnt) > globalCol);
+          GO familyOffset                   = globalCol - (block * numGlobalVars + colBlockOffset);
+          columnIndices(colId + colIdStart) = block * colFamilyCnt + familyOffset;
+          values(colId + colIdStart)        = sparseRowView.value(localCol);
+          colId++;
+        }
+        maxNumEntries = Kokkos::max(maxNumEntries, colId);
+      },
+      Kokkos::Max<LO>(maxNumEntriesSubblock));
 
-      // is this column in the variable family
-      if (inFamily) {
-        numOwnedCols++;
-      }
-    }
-    numEntriesPerRow[localRow] += numOwnedCols;
-  }
+  // Build the column map from the contiguous column GIDs, convert to local
+  // column indices, and sort each row.
+  Teuchos::RCP<const Tpetra::Map<LO, GO, NT> > colMap;
+  Tpetra::Details::makeColMap<LO, GO, NT>(colMap, domainMap, columnIndices);
+  TEUCHOS_ASSERT(colMap);
 
-  RCP<Tpetra::CrsMatrix<ST, LO, GO, NT> > mat = rcp(new Tpetra::CrsMatrix<ST, LO, GO, NT>(
-      rcpFromRef(rowMap), Teuchos::ArrayView<const size_t>(numEntriesPerRow)));
+  auto colMap_dev = colMap->getLocalMap();
+  auto localColumnIndices =
+      index_type(Kokkos::ViewAllocateWithoutInitializing("localColumnIndices"), totalNumOwnedCols);
+  Kokkos::parallel_for(
+      Kokkos::RangePolicy<Kokkos::Schedule<Kokkos::Dynamic>, matrix_execution_space>(
+          0, totalNumOwnedCols),
+      KOKKOS_LAMBDA(const LO index) {
+        localColumnIndices(index) = colMap_dev.getLocalElement(columnIndices(index));
+      });
 
-  // for insertion
-  std::vector<GO> colIndices(maxNumEntries);
-  std::vector<ST> colValues(maxNumEntries);
+  KokkosSparse::sort_crs_matrix<matrix_execution_space, row_map_type, index_type, values_type>(
+      prefixSumEntriesPerRow, localColumnIndices, values);
 
-  // insert each row into subblock
-  // let FillComplete handle column distribution
-  for (LO localRow = 0; localRow < numMyRows; localRow++) {
-    size_t numEntries = invalid;
-    GO globalRow      = gRowMap.getGlobalElement(localRow);
-    GO contigRow      = rowMap.getGlobalElement(localRow);
+  auto lcl_mat = Tpetra::CrsMatrix<ST, LO, GO, NT>::local_matrix_device_type(
+      "localMat", numMyRows, maxNumEntriesSubblock, totalNumOwnedCols, values,
+      prefixSumEntriesPerRow, localColumnIndices);
 
-    TEUCHOS_ASSERT(globalRow >= 0);
-    TEUCHOS_ASSERT(contigRow >= 0);
-
-    // extract a global row copy
-    localA.getGlobalRowCopy(globalRow, indices, values, numEntries);
-    LO numOwnedCols = 0;
-    for (size_t localCol = 0; localCol < numEntries; localCol++) {
-      GO globalCol = indices(localCol);
-
-      // determinate which block this column ID is in
-      int block = globalCol / numGlobalVars;
-
-      bool inFamily = true;
-
-      // test the beginning of the block
-      inFamily &= (block * numGlobalVars + colBlockOffset <= globalCol);
-      inFamily &= ((block * numGlobalVars + colBlockOffset + colFamilyCnt) > globalCol);
-
-      // is this column in the variable family
-      if (inFamily) {
-        GO familyOffset = globalCol - (block * numGlobalVars + colBlockOffset);
-
-        colIndices[numOwnedCols] = block * colFamilyCnt + familyOffset;
-        colValues[numOwnedCols]  = values(localCol);
-
-        numOwnedCols++;
-      }
-    }
-
-    // insert it into the new matrix
-    colIndices.resize(numOwnedCols);
-    colValues.resize(numOwnedCols);
-    mat->insertGlobalValues(contigRow, Teuchos::ArrayView<GO>(colIndices),
-                            Teuchos::ArrayView<ST>(colValues));
-    colIndices.resize(maxNumEntries);
-    colValues.resize(maxNumEntries);
-  }
-
-  // fill it and automagically optimize the storage
-  mat->fillComplete(rcpFromRef(colMap), rcpFromRef(rowMap));
+  RCP<Tpetra::CrsMatrix<ST, LO, GO, NT> > mat =
+      rcp(new Tpetra::CrsMatrix<ST, LO, GO, NT>(lcl_mat, rowMap, colMap, domainMap, rangeMap));
 
   return mat;
 }
