@@ -120,6 +120,16 @@ IF(${PACKAGE_NAME}_ENABLE_SPLIT_ETI_CPP_FILES)
   MESSAGE(STATUS "Split MueLu ETI files: this may slow down the compilation process.")
 ENDIF()
 
+TRIBITS_ADD_OPTION_AND_DEFINE(
+  ${PACKAGE_NAME}_ENABLE_GPTUNE_PYTHON_DEMO
+  HAVE_${PACKAGE_NAME_UC}_GPTUNE_PYTHON_DEMO
+  "Enable the optional Python GPTune demo/test for MueLu. GPTune remains a runtime-only optional dependency."
+  NO
+)
+
+SET(${PACKAGE_NAME}_GPTUNE_PYTHONPATH "" CACHE STRING
+  "Optional PYTHONPATH prefix for the MueLu GPTune Python demo, e.g. /path/to/GPTune")
+
 # Memory testing
 IF(${PACKAGE_NAME}_ENABLE_MEMORY_TESTING)
   SET(MUELU_VALGRIND_TESTING YES)

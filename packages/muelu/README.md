@@ -59,6 +59,8 @@ MueLu is part of the [Trilinos Project](https://trilinos.github.io), and additio
 
 The [MueLu tutorial](https://muelu.github.io/) describes the most important features of MueLu, from beginning information to advanced usage. It contains accompanying exercises where the interested user can do their own experiments with multigrid parameters. The MueLu tutorial is part of the Trilinos repository, and its examples are automatically tested to ensure that they compile and run.
 
+An optional Python GPTune integration test for tuning MueLu parameters on a small diffusion problem is documented in [`test/gptune/README.md`](test/gptune/README.md).
+
 ## Questions? 
 
 Contact lead developers:

@@ -395,12 +395,59 @@ TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(PetraOperator, ReusePreconditioner2, Scalar, L
   }
 }
 
-#define MUELU_ETI_GROUP(Scalar, LO, GO, Node)                                                               \
-  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(PetraOperator, CreatePreconditioner, Scalar, LO, GO, Node)           \
-  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(PetraOperator, CreatePreconditioner_XMLOnList, Scalar, LO, GO, Node) \
-  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(PetraOperator, CreatePreconditioner_PDESystem, Scalar, LO, GO, Node) \
-  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(PetraOperator, ReusePreconditioner, Scalar, LO, GO, Node)            \
-  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(PetraOperator, ReusePreconditioner2, Scalar, LO, GO, Node)
+TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(PetraOperator, CreatePreconditioner_GPTuneList, Scalar, LocalOrdinal, GlobalOrdinal, Node) {
+#include "MueLu_UseShortNames.hpp"
+  MUELU_TESTING_SET_OSTREAM;
+  MUELU_TESTING_LIMIT_SCOPE(Scalar, GlobalOrdinal, Node);
+
+  using Teuchos::RCP;
+
+  Xpetra::UnderlyingLib lib = TestHelpers::Parameters::getLib();
+  if (lib != Xpetra::UseTpetra) {
+    TEUCHOS_TEST_FOR_EXCEPTION(true, MueLu::Exceptions::InvalidArgument, "Unknown Xpetra lib");
+  }
+
+  if (Teuchos::ScalarTraits<SC>::isComplex)
+    return;
+
+  typedef Tpetra::Operator<SC, LO, GO, NO> tpetra_operator_type;
+
+  GO nx = 125;
+  RCP<Matrix> Op = TestHelpers::TestFactory<SC, LO, GO, NO>::Build1DPoisson(nx, lib);
+  RCP<Tpetra::CrsMatrix<SC, LO, GO, NO> > tpA = toTpetra(Op);
+
+  Teuchos::ParameterList params;
+  params.set("verbosity", "none");
+  params.set("max levels", 3);
+  params.set("coarse: max size", Teuchos::as<int>(100));
+  params.set("smoother: type", "RELAXATION");
+  params.sublist("smoother: params").set("relaxation: sweeps", 1);
+
+  auto& gt = params.sublist("gptune");
+  gt.set("enabled", true);
+  gt.set("backend", "external-driver");
+  gt.set("objective", "setup time");
+  auto& search = gt.sublist("search space");
+  auto& maxLevels = search.sublist("max levels");
+  maxLevels.set("type", "integer");
+  maxLevels.set("min", 2);
+  maxLevels.set("max", 3);
+  maxLevels.set("initial value", 2);
+
+  RCP<MueLu::TpetraOperator<SC, LO, GO, NO> > tH =
+      MueLu::CreateTpetraPreconditioner<SC, LO, GO, NO>(RCP<tpetra_operator_type>(tpA), params);
+
+  TEST_ASSERT(!tH.is_null());
+  TEST_ASSERT(tH->GetHierarchy() != Teuchos::null);
+}
+
+#define MUELU_ETI_GROUP(Scalar, LO, GO, Node)                                                                    \
+  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(PetraOperator, CreatePreconditioner, Scalar, LO, GO, Node)                \
+  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(PetraOperator, CreatePreconditioner_XMLOnList, Scalar, LO, GO, Node)      \
+  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(PetraOperator, CreatePreconditioner_PDESystem, Scalar, LO, GO, Node)      \
+  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(PetraOperator, ReusePreconditioner, Scalar, LO, GO, Node)                 \
+  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(PetraOperator, ReusePreconditioner2, Scalar, LO, GO, Node)                \
+  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(PetraOperator, CreatePreconditioner_GPTuneList, Scalar, LO, GO, Node)
 
 #include <MueLu_ETI_4arg.hpp>
 
