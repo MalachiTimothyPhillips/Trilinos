@@ -29,6 +29,8 @@
 #include <stdlib.h>
 
 #include <MueLu_KokkosTuningInterface.hpp>
+#include <MueLu_GPTuneBridge.hpp>
+#include <MueLu_GPTuneParameterList.hpp>
 
 namespace MueLu {
 
@@ -85,6 +87,27 @@ CreateXpetraPreconditioner(Teuchos::RCP<Xpetra::Matrix<Scalar, LocalOrdinal, Glo
     MueLu::KokkosTuningInterface KokkosTuner(op->getMap()->getComm());
     KokkosTuner.SetParameterList(paramList);
     KokkosTuner.SetMueLuParameters(paramList);
+    tm->stop();
+    tm->incrementNumCalls();
+    tm = Teuchos::null;
+  }
+
+  if (paramList.isSublist("gptune") &&
+      paramList.sublist("gptune").get<bool>("enabled", false)) {
+    if (label != "")
+      timerName = "MueLu GPTune setup time (" + label + ")";
+    else
+      timerName = "MueLu GPTune setup time";
+    tm = Teuchos::TimeMonitor::getNewTimer(timerName);
+    tm->start();
+
+    const auto parsedSpec = MueLu::GPTuneInt::ParseAndValidateGPTuneList(paramList);
+    const auto baseParams = MueLu::GPTuneInt::StripGPTuneSublist(paramList);
+    const auto bridgeResult = MueLu::GPTuneInt::RunGPTuneBridge<SC, LO, GO, NO>(op, baseParams, inParamList, parsedSpec);
+
+    paramList = baseParams;
+    MueLu::GPTuneInt::ApplyCandidateToParameterList(bridgeResult.bestCandidate, paramList);
+
     tm->stop();
     tm->incrementNumCalls();
     tm = Teuchos::null;

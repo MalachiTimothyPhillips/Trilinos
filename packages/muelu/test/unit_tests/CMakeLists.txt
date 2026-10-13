@@ -90,6 +90,7 @@ APPEND_SET(
   Utilities.cpp
   VariableContainer.cpp
   VariableDofLaplacianFactory.cpp
+  Tuning/GPTuneParameterList.cpp
   MueLu_CoupledRBMFactory.cpp
   PermutationFactory.cpp
   RigidBodyModeFactory.cpp
