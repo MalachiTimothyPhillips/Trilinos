@@ -27,6 +27,10 @@
 
 #cmakedefine HAVE_MUELU_COALESCEDROP_ALLOW_OLD_PARAMETERS
 
+#cmakedefine HAVE_MUELU_GPTUNE_PYTHON_DEMO
+
+#cmakedefine HAVE_MUELU_GPTUNE_PYTHON_WORKER
+
 /* Optional Dependencies */
 
 #cmakedefine HAVE_MUELU_BELOS

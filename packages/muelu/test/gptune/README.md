@@ -1,9 +1,15 @@
 # Optional MueLu/GPTune Python integration test
 
-This directory contains an optional integration test that runs the GPTune Python
-stack against a small MueLu diffusion problem.  The test is off by default and
-is intended for environments that can provide GPTune's Python dependencies at
-runtime.
+This directory contains two optional MueLu/GPTune paths:
+
+- `diffusion_gptune_demo.py`: a Python-driver integration test that runs the
+  GPTune Python stack against a small MueLu diffusion problem.
+- `muelu_gptune_worker.py`: an external worker for the MueLu-owned tuning path,
+  where MueLu applies/evaluates candidates and Python only proposes them through
+  a newline-delimited JSON ask/tell protocol.
+
+Both paths are off by default and intended for environments that can provide the
+needed Python runtime dependencies.
 
 The integration test does the following:
 
@@ -13,9 +19,13 @@ The integration test does the following:
    driver, and
 4. reports the best parameter set with a `GPTUNE_DEMO_BEST ...` line.
 
-This test is a Python-driver integration path.  It does **not** mean that the
-C++ `gptune` sublist in `CreatePreconditioner` invokes GPTune yet; that path
-still goes through the current C++ bridge implementation.
+The Python-driver integration path remains useful as an end-to-end GPTune smoke
+test.  The C++ `gptune` sublist now also has a MueLu-owned tuning loop with a
+fixed deterministic backend and an optional external Python-worker backend.  The
+worker backend keeps Python/GPTune out of the Trilinos process: C++ sends an
+`init` JSON message, reads `candidate` messages, evaluates each candidate inside
+MueLu, sends `tell` messages with objectives, and receives a final `best`
+message.
 
 For a standalone setup guide suitable for sharing with other users, see
 [`SETUP.md`](SETUP.md).
@@ -37,6 +47,22 @@ lets Python import `GPTune`.  When this variable is set, the CTest environment
 uses it directly instead of appending the ambient `PYTHONPATH`; this avoids
 mixing the requested Python executable with incompatible site-packages from the
 Trilinos build environment.
+
+To opt into the MueLu-owned external worker backend, also configure with:
+
+```bash
+-DMueLu_ENABLE_GPTUNE_PYTHON_WORKER=ON
+```
+
+Then use `gptune.backend = python` and provide `gptune.worker.argv` in the MueLu
+parameter list, for example an argv array equivalent to:
+
+```text
+python3 /path/to/muelu_gptune_worker.py
+```
+
+The deterministic `fake_muelu_gptune_worker.py` script uses the same protocol and
+is intended for process/protocol tests that should not import GPTune.
 
 A known-good local configuration used during development was:
 

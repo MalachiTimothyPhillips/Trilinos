@@ -105,6 +105,9 @@ CreateXpetraPreconditioner(Teuchos::RCP<Xpetra::Matrix<Scalar, LocalOrdinal, Glo
     const auto baseParams = MueLu::GPTuneInt::StripGPTuneSublist(paramList);
     const auto bridgeResult = MueLu::GPTuneInt::RunGPTuneBridge<SC, LO, GO, NO>(op, baseParams, inParamList, parsedSpec);
 
+    TEUCHOS_TEST_FOR_EXCEPTION(parsedSpec.mode == MueLu::GPTuneInt::Mode::TuneOnly, Exceptions::RuntimeError,
+                               "MueLu GPTune mode 'tune-only' needs a dedicated public tuning API and cannot return a usable preconditioner from CreateXpetraPreconditioner");
+
     paramList = baseParams;
     MueLu::GPTuneInt::ApplyCandidateToParameterList(bridgeResult.bestCandidate, paramList);
 

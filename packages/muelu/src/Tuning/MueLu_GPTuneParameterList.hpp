@@ -26,6 +26,7 @@ enum class Mode {
 };
 
 enum class Backend {
+  Fixed,
   ExternalDriver,
   Python,
   Embedded
@@ -116,6 +117,12 @@ struct EvaluationSpec {
   bool fail_on_nonconvergence = true;
 };
 
+struct WorkerSpec {
+  std::vector<std::string> argv;
+  int startup_timeout_seconds = 30;
+  int request_timeout_seconds = 300;
+};
+
 struct ParsedSpec {
   bool enabled = false;
 
@@ -138,6 +145,7 @@ struct ParsedSpec {
 
   std::map<std::string, TaskParameterValue> task_parameters;
   EvaluationSpec evaluation;
+  WorkerSpec worker;
   std::vector<SearchParameter> search_parameters;
 };
 
@@ -146,6 +154,17 @@ using Candidate = std::map<std::string, Teuchos::any>;
 ParsedSpec ParseAndValidateGPTuneList(const Teuchos::ParameterList& fullList);
 
 Teuchos::ParameterList StripGPTuneSublist(const Teuchos::ParameterList& fullList);
+
+std::vector<std::string> SplitParameterPath(const std::string& key,
+                                            const std::string& delimiter = "||");
+
+bool GetAnyParameterByPath(const Teuchos::ParameterList& params,
+                           const std::string& key,
+                           Teuchos::any& value);
+
+void SetAnyParameterByPath(Teuchos::ParameterList& params,
+                           const std::string& key,
+                           const Teuchos::any& value);
 
 void ApplyCandidateToParameterList(const Candidate& candidate,
                                    Teuchos::ParameterList& params);

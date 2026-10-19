@@ -1,8 +1,10 @@
 # Setting up the optional MueLu/GPTune Python integration test
 
 This note describes how to set up and run the optional MueLu/GPTune Python
-integration test. The test is off by default and is intended for environments
-that can provide GPTune's Python dependencies at runtime.
+integration paths. The original Python-driver demo is off by default and is
+intended for environments that can provide GPTune's Python dependencies at
+runtime. The newer MueLu-owned path can additionally launch an external Python
+worker when `MueLu_ENABLE_GPTUNE_PYTHON_WORKER=ON`.
 
 ## What the test does
 
@@ -20,9 +22,12 @@ When enabled, it:
 3. evaluates each candidate by launching the existing MueLu scaling driver, and
 4. reports the best candidate with a `GPTUNE_DEMO_BEST ...` line.
 
-This is a Python-driver integration path. It does **not** mean that the C++
-`gptune` sublist in `CreatePreconditioner` invokes real GPTune yet; that path
-still goes through the current C++ bridge implementation.
+This Python-driver integration path remains the simplest end-to-end GPTune smoke
+test. The C++ `gptune` sublist in `CreatePreconditioner` now also has a
+MueLu-owned tuning loop with a fixed deterministic backend and an optional
+external Python-worker backend. In that newer path, MueLu owns candidate
+application/evaluation and the worker only proposes candidates through a
+newline-delimited JSON ask/tell protocol.
 
 ## Configure Trilinos
 
@@ -44,6 +49,17 @@ directly instead of appending the ambient `PYTHONPATH`. This is intentional: the
 ambient Trilinos build environment may contain site-packages from a different
 Python version, and mixing those with the selected `Python3_EXECUTABLE` can make
 GPTune imports fail.
+
+To configure the MueLu-owned Python-worker backend as well, add:
+
+```bash
+-DMueLu_ENABLE_GPTUNE_PYTHON_WORKER=ON
+```
+
+The backend is selected at runtime with `gptune.backend = python` and requires a
+`gptune.worker.argv` array naming the interpreter and worker script. The
+`fake_muelu_gptune_worker.py` script exercises the same protocol without a GPTune
+import; `muelu_gptune_worker.py` is the GPTune-oriented worker entry point.
 
 A known-good local configuration used during development was:
 
