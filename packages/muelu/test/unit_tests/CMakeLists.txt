@@ -136,6 +136,16 @@ TRIBITS_COPY_FILES_TO_BINARY_DIR(
   DEST_DIR ${CMAKE_CURRENT_BINARY_DIR}/TestMatrices
 )
 
+IF(${PACKAGE_NAME}_ENABLE_GPTUNE_PYTHON_WORKER)
+  TRIBITS_COPY_FILES_TO_BINARY_DIR(
+    UnitTestsGPTuneWorker_cp
+    SOURCE_DIR ${MueLu_SOURCE_DIR}/test/gptune
+    SOURCE_FILES fake_muelu_gptune_worker.py
+    DEST_DIR ${CMAKE_CURRENT_BINARY_DIR}
+  )
+  ADD_DEFINITIONS(-DMUELU_GPTUNE_FAKE_WORKER="${MueLu_SOURCE_DIR}/test/gptune/fake_muelu_gptune_worker.py")
+ENDIF()
+
 APPEND_SET(
   SOURCES_BLOCKED
   BlockedCoarseMapFactory.cpp

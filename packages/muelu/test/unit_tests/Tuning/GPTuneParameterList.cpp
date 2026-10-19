@@ -15,10 +15,43 @@
 
 #include <Tpetra_Map.hpp>
 
-#include "MueLu_GPTuneBridge.hpp"
+#include "MueLu_config.hpp"
+#include "MueLu_FixedTuningBackend.hpp"
 #include "MueLu_GPTuneParameterList.hpp"
+#ifdef HAVE_MUELU_GPTUNE_PYTHON_WORKER
+#include "MueLu_PythonWorkerTuningBackend.hpp"
+#endif
+#include "MueLu_TuningLoop.hpp"
 
 namespace MueLuTests {
+
+namespace {
+
+class SumEvaluator : public MueLu::GPTuneInt::CandidateEvaluator {
+ public:
+  MueLu::GPTuneInt::EvaluationResult evaluate(const MueLu::GPTuneInt::Candidate& candidate) override {
+    MueLu::GPTuneInt::EvaluationResult result;
+    result.objective = 0.0;
+    for (const auto& kv : candidate) {
+      if (kv.second.type() == typeid(int)) {
+        result.objective += Teuchos::any_cast<int>(kv.second);
+      } else if (kv.second.type() == typeid(double)) {
+        result.objective += Teuchos::any_cast<double>(kv.second);
+      }
+    }
+    return result;
+  }
+};
+
+MueLu::GPTuneInt::Candidate RunFixedBackend(const MueLu::GPTuneInt::ParsedSpec& spec,
+                                            const Teuchos::ParameterList& baseParams) {
+  MueLu::GPTuneInt::FixedTuningBackend backend;
+  SumEvaluator evaluator;
+  const auto summary = MueLu::GPTuneInt::RunTuningLoop(spec, backend, evaluator, baseParams);
+  return summary.bestCandidate;
+}
+
+}  // namespace
 
 TEUCHOS_UNIT_TEST(GPTuneParameterList, ParseMinimalValidSpec) {
   Teuchos::ParameterList params;
@@ -40,13 +73,18 @@ TEUCHOS_UNIT_TEST(GPTuneParameterList, ParseMinimalValidSpec) {
 }
 
 TEUCHOS_UNIT_TEST(GPTuneParameterList, ValidBackendsParse) {
-  const Teuchos::Array<std::string> backends{"external-driver", "python", "embedded"};
+  const Teuchos::Array<std::string> backends{"fixed", "external-driver", "python", "embedded"};
+  const Teuchos::Array<MueLu::GPTuneInt::Backend> expected{
+      MueLu::GPTuneInt::Backend::Fixed,
+      MueLu::GPTuneInt::Backend::ExternalDriver,
+      MueLu::GPTuneInt::Backend::Python,
+      MueLu::GPTuneInt::Backend::Embedded};
 
-  for (const auto& backend : backends) {
+  for (int i = 0; i < backends.size(); ++i) {
     Teuchos::ParameterList params;
     auto& gt = params.sublist("gptune");
     gt.set("enabled", true);
-    gt.set("backend", backend);
+    gt.set("backend", backends[i]);
     auto& search = gt.sublist("search space");
     auto& sweeps = search.sublist("relaxation: sweeps");
     sweeps.set("type", "integer");
@@ -55,6 +93,7 @@ TEUCHOS_UNIT_TEST(GPTuneParameterList, ValidBackendsParse) {
 
     const auto spec = MueLu::GPTuneInt::ParseAndValidateGPTuneList(params);
     TEST_ASSERT(spec.enabled);
+    TEST_EQUALITY(static_cast<int>(spec.backend), static_cast<int>(expected[i]));
   }
 }
 
@@ -187,6 +226,61 @@ TEUCHOS_UNIT_TEST(GPTuneParameterList, TaskParametersParseTypedValues) {
   TEST_ASSERT(spec.task_parameters.at("source").kind == MueLu::GPTuneInt::TaskParameterValue::Kind::Auto);
 }
 
+TEUCHOS_UNIT_TEST(GPTuneParameterList, WorkerSublistParses) {
+  Teuchos::ParameterList params;
+  auto& gt = params.sublist("gptune");
+  gt.set("enabled", true);
+  gt.set("backend", "python");
+  auto& worker = gt.sublist("worker");
+  worker.set("argv", Teuchos::Array<std::string>{"python3", "muelu_gptune_worker.py"});
+  worker.set("startup timeout seconds", 7);
+  worker.set("request timeout seconds", 11);
+  auto& search = gt.sublist("search space");
+  auto& sweeps = search.sublist("relaxation: sweeps");
+  sweeps.set("type", "integer");
+  sweeps.set("min", 1);
+  sweeps.set("max", 4);
+
+  const auto spec = MueLu::GPTuneInt::ParseAndValidateGPTuneList(params);
+
+  TEST_EQUALITY(spec.worker.argv.size(), 2);
+  TEST_EQUALITY(spec.worker.argv[0], "python3");
+  TEST_EQUALITY(spec.worker.argv[1], "muelu_gptune_worker.py");
+  TEST_EQUALITY(spec.worker.startup_timeout_seconds, 7);
+  TEST_EQUALITY(spec.worker.request_timeout_seconds, 11);
+}
+
+#ifdef HAVE_MUELU_GPTUNE_PYTHON_WORKER
+TEUCHOS_UNIT_TEST(GPTuneParameterList, PythonWorkerBackendUsesFakeWorker) {
+  Teuchos::ParameterList baseParams;
+
+  MueLu::GPTuneInt::ParsedSpec spec;
+  spec.enabled = true;
+  spec.backend = MueLu::GPTuneInt::Backend::Python;
+  spec.max_evaluations = 2;
+  spec.worker.argv = {"python3", MUELU_GPTUNE_FAKE_WORKER};
+  spec.worker.request_timeout_seconds = 10;
+
+  MueLu::GPTuneInt::SearchParameter sweeps;
+  sweeps.muelu_key = "relaxation: sweeps";
+  sweeps.type = MueLu::GPTuneInt::ParamType::Integer;
+  sweeps.has_int_bounds = true;
+  sweeps.int_min = 1;
+  sweeps.int_max = 4;
+  sweeps.has_initial_value = true;
+  sweeps.initial_value = 4;
+  spec.search_parameters.push_back(sweeps);
+
+  MueLu::GPTuneInt::PythonWorkerTuningBackend backend;
+  SumEvaluator evaluator;
+  const auto summary = MueLu::GPTuneInt::RunTuningLoop(spec, backend, evaluator, baseParams);
+
+  TEST_EQUALITY(summary.status, "success");
+  TEST_EQUALITY(summary.evaluationsPerformed, 2);
+  TEST_EQUALITY(Teuchos::any_cast<int>(summary.bestCandidate.at("relaxation: sweeps")), 1);
+}
+#endif
+
 TEUCHOS_UNIT_TEST(GPTuneParameterList, IsActiveHonorsActiveIfClauses) {
   MueLu::GPTuneInt::SearchParameter degree;
   degree.muelu_key = "chebyshev: degree";
@@ -231,6 +325,35 @@ TEUCHOS_UNIT_TEST(GPTuneParameterList, ApplyCandidateWritesValues) {
   TEST_EQUALITY(params.get<std::string>("smoother: type"), "RELAXATION");
 }
 
+TEUCHOS_UNIT_TEST(GPTuneParameterList, ApplyCandidateWritesNestedValues) {
+  Teuchos::ParameterList params;
+  params.sublist("smoother: params").set("relaxation: sweeps", 1);
+
+  MueLu::GPTuneInt::Candidate candidate;
+  candidate["smoother: params||relaxation: sweeps"] = 3;
+  candidate["smoother: params||relaxation: damping factor"] = 0.75;
+
+  MueLu::GPTuneInt::ApplyCandidateToParameterList(candidate, params);
+
+  const auto& smootherParams = params.sublist("smoother: params");
+  TEST_EQUALITY(smootherParams.get<int>("relaxation: sweeps"), 3);
+  TEST_FLOATING_EQUALITY(smootherParams.get<double>("relaxation: damping factor"), 0.75, 1.0e-15);
+}
+
+TEUCHOS_UNIT_TEST(GPTuneParameterList, NestedSearchSpaceKeyParses) {
+  Teuchos::ParameterList params;
+  auto& gt = params.sublist("gptune");
+  gt.set("enabled", true);
+  auto& search = gt.sublist("search space");
+  auto& sweeps = search.sublist("smoother: params||relaxation: sweeps");
+  sweeps.set("type", "integer");
+  sweeps.set("min", 1);
+  sweeps.set("max", 4);
+
+  const auto spec = MueLu::GPTuneInt::ParseAndValidateGPTuneList(params);
+  TEST_EQUALITY(spec.search_parameters[0].muelu_key, "smoother: params||relaxation: sweeps");
+}
+
 TEUCHOS_UNIT_TEST(GPTuneParameterList, WriteResultsLeavesTopLevelUntouchedWhenDisabled) {
   Teuchos::ParameterList params;
   auto& gt = params.sublist("gptune");
@@ -270,12 +393,29 @@ TEUCHOS_UNIT_TEST(GPTuneParameterList, WriteResultsPopulatesResultsSublist) {
   TEST_EQUALITY(params.get<std::string>("smoother: type"), "CHEBYSHEV");
 }
 
-TEUCHOS_UNIT_TEST(GPTuneParameterList, PlaceholderBridgeUsesInitialValueBeforeBaseValue) {
+TEUCHOS_UNIT_TEST(GPTuneParameterList, WriteResultsSetsNestedValuesWhenEnabled) {
+  Teuchos::ParameterList params;
+  auto& gt = params.sublist("gptune");
+  gt.set("set best parameters on output", true);
+  params.sublist("smoother: params").set("relaxation: sweeps", 1);
+
+  MueLu::GPTuneInt::Candidate candidate;
+  candidate["smoother: params||relaxation: sweeps"] = 4;
+
+  MueLu::GPTuneInt::WriteResultsToParameterList(params, candidate, 1.5, 2, "success", "fixed");
+
+  const auto& results = params.sublist("gptune").sublist("results");
+  TEST_EQUALITY(results.sublist("best parameters").get<int>("smoother: params||relaxation: sweeps"), 4);
+  TEST_EQUALITY(params.sublist("smoother: params").get<int>("relaxation: sweeps"), 4);
+}
+
+TEUCHOS_UNIT_TEST(GPTuneParameterList, FixedBackendUsesInitialValueBeforeBaseValue) {
   Teuchos::ParameterList baseParams;
   baseParams.set("relaxation: sweeps", 2);
 
   MueLu::GPTuneInt::ParsedSpec spec;
   spec.enabled = true;
+  spec.max_evaluations = 1;
 
   MueLu::GPTuneInt::SearchParameter sweeps;
   sweeps.muelu_key = "relaxation: sweeps";
@@ -287,21 +427,18 @@ TEUCHOS_UNIT_TEST(GPTuneParameterList, PlaceholderBridgeUsesInitialValueBeforeBa
   sweeps.initial_value = 4;
   spec.search_parameters.push_back(sweeps);
 
-  using Node = Tpetra::Map<>::node_type;
-  using GO = Tpetra::Map<>::global_ordinal_type;
+  const auto bestCandidate = RunFixedBackend(spec, baseParams);
 
-  const auto result = MueLu::GPTuneInt::RunGPTuneBridge<double, int, GO, Node>(Teuchos::null, baseParams, baseParams, spec);
-
-  TEST_EQUALITY(result.status, "success");
-  TEST_EQUALITY(Teuchos::any_cast<int>(result.bestCandidate.at("relaxation: sweeps")), 4);
+  TEST_EQUALITY(Teuchos::any_cast<int>(bestCandidate.at("relaxation: sweeps")), 4);
 }
 
-TEUCHOS_UNIT_TEST(GPTuneParameterList, PlaceholderBridgeUsesBaseValueWhenNoInitialValue) {
+TEUCHOS_UNIT_TEST(GPTuneParameterList, FixedBackendUsesBaseValueWhenNoInitialValue) {
   Teuchos::ParameterList baseParams;
   baseParams.set("relaxation: sweeps", 3);
 
   MueLu::GPTuneInt::ParsedSpec spec;
   spec.enabled = true;
+  spec.max_evaluations = 1;
 
   MueLu::GPTuneInt::SearchParameter sweeps;
   sweeps.muelu_key = "relaxation: sweeps";
@@ -311,15 +448,33 @@ TEUCHOS_UNIT_TEST(GPTuneParameterList, PlaceholderBridgeUsesBaseValueWhenNoIniti
   sweeps.int_max = 4;
   spec.search_parameters.push_back(sweeps);
 
-  using Node = Tpetra::Map<>::node_type;
-  using GO = Tpetra::Map<>::global_ordinal_type;
+  const auto bestCandidate = RunFixedBackend(spec, baseParams);
 
-  const auto result = MueLu::GPTuneInt::RunGPTuneBridge<double, int, GO, Node>(Teuchos::null, baseParams, baseParams, spec);
-
-  TEST_EQUALITY(Teuchos::any_cast<int>(result.bestCandidate.at("relaxation: sweeps")), 3);
+  TEST_EQUALITY(Teuchos::any_cast<int>(bestCandidate.at("relaxation: sweeps")), 3);
 }
 
-TEUCHOS_UNIT_TEST(GPTuneParameterList, PlaceholderBridgeFallsBackToCategoricalFirstValue) {
+TEUCHOS_UNIT_TEST(GPTuneParameterList, FixedBackendUsesNestedBaseValueWhenNoInitialValue) {
+  Teuchos::ParameterList baseParams;
+  baseParams.sublist("smoother: params").set("relaxation: sweeps", 3);
+
+  MueLu::GPTuneInt::ParsedSpec spec;
+  spec.enabled = true;
+  spec.max_evaluations = 1;
+
+  MueLu::GPTuneInt::SearchParameter sweeps;
+  sweeps.muelu_key = "smoother: params||relaxation: sweeps";
+  sweeps.type = MueLu::GPTuneInt::ParamType::Integer;
+  sweeps.has_int_bounds = true;
+  sweeps.int_min = 1;
+  sweeps.int_max = 4;
+  spec.search_parameters.push_back(sweeps);
+
+  const auto bestCandidate = RunFixedBackend(spec, baseParams);
+
+  TEST_EQUALITY(Teuchos::any_cast<int>(bestCandidate.at("smoother: params||relaxation: sweeps")), 3);
+}
+
+TEUCHOS_UNIT_TEST(GPTuneParameterList, FixedBackendFallsBackToCategoricalFirstValue) {
   Teuchos::ParameterList baseParams;
 
   MueLu::GPTuneInt::ParsedSpec spec;
@@ -331,19 +486,17 @@ TEUCHOS_UNIT_TEST(GPTuneParameterList, PlaceholderBridgeFallsBackToCategoricalFi
   smoother.categorical_values = {"RELAXATION", "CHEBYSHEV"};
   spec.search_parameters.push_back(smoother);
 
-  using Node = Tpetra::Map<>::node_type;
-  using GO = Tpetra::Map<>::global_ordinal_type;
+  const auto bestCandidate = RunFixedBackend(spec, baseParams);
 
-  const auto result = MueLu::GPTuneInt::RunGPTuneBridge<double, int, GO, Node>(Teuchos::null, baseParams, baseParams, spec);
-
-  TEST_EQUALITY(Teuchos::any_cast<std::string>(result.bestCandidate.at("smoother: type")), "RELAXATION");
+  TEST_EQUALITY(Teuchos::any_cast<std::string>(bestCandidate.at("smoother: type")), "RELAXATION");
 }
 
-TEUCHOS_UNIT_TEST(GPTuneParameterList, PlaceholderBridgeFallsBackToNumericMins) {
+TEUCHOS_UNIT_TEST(GPTuneParameterList, FixedBackendFallsBackToNumericMins) {
   Teuchos::ParameterList baseParams;
 
   MueLu::GPTuneInt::ParsedSpec spec;
   spec.enabled = true;
+  spec.max_evaluations = 1;
 
   MueLu::GPTuneInt::SearchParameter sweeps;
   sweeps.muelu_key = "relaxation: sweeps";
@@ -361,13 +514,10 @@ TEUCHOS_UNIT_TEST(GPTuneParameterList, PlaceholderBridgeFallsBackToNumericMins) 
   dropTol.real_max = 1.0e-2;
   spec.search_parameters.push_back(dropTol);
 
-  using Node = Tpetra::Map<>::node_type;
-  using GO = Tpetra::Map<>::global_ordinal_type;
+  const auto bestCandidate = RunFixedBackend(spec, baseParams);
 
-  const auto result = MueLu::GPTuneInt::RunGPTuneBridge<double, int, GO, Node>(Teuchos::null, baseParams, baseParams, spec);
-
-  TEST_EQUALITY(Teuchos::any_cast<int>(result.bestCandidate.at("relaxation: sweeps")), 2);
-  TEST_FLOATING_EQUALITY(Teuchos::any_cast<double>(result.bestCandidate.at("aggregation: drop tol")), 1.0e-4, 1.0e-15);
+  TEST_EQUALITY(Teuchos::any_cast<int>(bestCandidate.at("relaxation: sweeps")), 2);
+  TEST_FLOATING_EQUALITY(Teuchos::any_cast<double>(bestCandidate.at("aggregation: drop tol")), 1.0e-4, 1.0e-15);
 }
 
 }  // namespace MueLuTests

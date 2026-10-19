@@ -31,6 +31,7 @@ Mode parseMode(const std::string& s) {
 }
 
 Backend parseBackend(const std::string& s) {
+  if (s == "fixed") return Backend::Fixed;
   if (s == "external-driver") return Backend::ExternalDriver;
   if (s == "python") return Backend::Python;
   if (s == "embedded") return Backend::Embedded;
@@ -225,6 +226,13 @@ std::string anyToString(const Teuchos::any& value) {
   throw std::runtime_error("Unsupported candidate value type");
 }
 
+std::string leafParameterName(const std::string& key) {
+  const std::string delimiter = "||";
+  const auto pos = key.rfind(delimiter);
+  if (pos == std::string::npos) return key;
+  return key.substr(pos + delimiter.size());
+}
+
 bool isKnownMueLuKey(const std::string& key) {
   static const std::set<std::string> supportedTunableKeys = {
       "smoother: type",
@@ -237,10 +245,11 @@ bool isKnownMueLuKey(const std::string& key) {
       "coarse: max size",
       "max levels"};
 
-  if (supportedTunableKeys.find(key) != supportedTunableKeys.end()) return true;
+  const auto leafKey = leafParameterName(key);
+  if (supportedTunableKeys.find(leafKey) != supportedTunableKeys.end()) return true;
 
   try {
-    (void)MueLu::MasterList::getEntry(key);
+    (void)MueLu::MasterList::getEntry(leafKey);
     return true;
   } catch (...) {
     return false;
@@ -354,6 +363,25 @@ ParsedSpec ParseAndValidateGPTuneList(const Teuchos::ParameterList& fullList) {
                                "gptune.evaluation.reruns must be >= 1");
   }
 
+  if (gt.isSublist("worker")) {
+    const auto& worker = gt.sublist("worker");
+    if (worker.isParameter("argv")) {
+      const auto argv = worker.get<Teuchos::Array<std::string>>("argv");
+      spec.worker.argv.assign(argv.begin(), argv.end());
+    }
+    if (worker.isParameter("startup timeout seconds")) {
+      spec.worker.startup_timeout_seconds = worker.get<int>("startup timeout seconds");
+    }
+    if (worker.isParameter("request timeout seconds")) {
+      spec.worker.request_timeout_seconds = worker.get<int>("request timeout seconds");
+    }
+
+    TEUCHOS_TEST_FOR_EXCEPTION(spec.worker.startup_timeout_seconds < 1, std::runtime_error,
+                               "gptune.worker.startup timeout seconds must be >= 1");
+    TEUCHOS_TEST_FOR_EXCEPTION(spec.worker.request_timeout_seconds < 1, std::runtime_error,
+                               "gptune.worker.request timeout seconds must be >= 1");
+  }
+
   TEUCHOS_TEST_FOR_EXCEPTION(!gt.isSublist("search space"), std::runtime_error,
                              "gptune requires sublist 'search space'");
 
@@ -414,23 +442,83 @@ Teuchos::ParameterList StripGPTuneSublist(const Teuchos::ParameterList& fullList
   return out;
 }
 
+std::vector<std::string> SplitParameterPath(const std::string& key,
+                                            const std::string& delimiter) {
+  std::vector<std::string> parts;
+  std::string::size_type begin = 0;
+  while (true) {
+    const auto end = key.find(delimiter, begin);
+    if (end == std::string::npos) {
+      parts.push_back(key.substr(begin));
+      break;
+    }
+    parts.push_back(key.substr(begin, end - begin));
+    begin = end + delimiter.size();
+  }
+  return parts;
+}
+
+bool GetAnyParameterByPath(const Teuchos::ParameterList& params,
+                           const std::string& key,
+                           Teuchos::any& value) {
+  const auto parts = SplitParameterPath(key);
+  if (parts.empty()) return false;
+
+  const Teuchos::ParameterList* activeList = &params;
+  for (std::size_t i = 0; i + 1 < parts.size(); ++i) {
+    if (!activeList->isSublist(parts[i])) return false;
+    activeList = &activeList->sublist(parts[i]);
+  }
+
+  const auto& leaf = parts.back();
+  if (!activeList->isParameter(leaf)) return false;
+
+  const auto& entry = activeList->getEntry(leaf);
+  if (entry.isType<std::string>()) {
+    value = activeList->get<std::string>(leaf);
+  } else if (entry.isType<int>()) {
+    value = activeList->get<int>(leaf);
+  } else if (entry.isType<double>()) {
+    value = activeList->get<double>(leaf);
+  } else if (entry.isType<bool>()) {
+    value = activeList->get<bool>(leaf);
+  } else {
+    throw std::runtime_error("Unsupported base ParameterList type for GPTune key '" + key + "'");
+  }
+
+  return true;
+}
+
+void SetAnyParameterByPath(Teuchos::ParameterList& params,
+                           const std::string& key,
+                           const Teuchos::any& value) {
+  const auto parts = SplitParameterPath(key);
+  TEUCHOS_TEST_FOR_EXCEPTION(parts.empty(), std::runtime_error,
+                             "Empty GPTune candidate parameter key");
+
+  Teuchos::ParameterList* activeList = &params;
+  for (std::size_t i = 0; i + 1 < parts.size(); ++i) {
+    activeList = &activeList->sublist(parts[i]);
+  }
+
+  const auto& leaf = parts.back();
+  if (value.type() == typeid(std::string)) {
+    activeList->set(leaf, Teuchos::any_cast<std::string>(value));
+  } else if (value.type() == typeid(int)) {
+    activeList->set(leaf, Teuchos::any_cast<int>(value));
+  } else if (value.type() == typeid(double)) {
+    activeList->set(leaf, Teuchos::any_cast<double>(value));
+  } else if (value.type() == typeid(bool)) {
+    activeList->set(leaf, Teuchos::any_cast<bool>(value));
+  } else {
+    throw std::runtime_error("Unsupported candidate value type for '" + key + "'");
+  }
+}
+
 void ApplyCandidateToParameterList(const Candidate& candidate,
                                    Teuchos::ParameterList& params) {
   for (const auto& kv : candidate) {
-    const auto& key = kv.first;
-    const auto& value = kv.second;
-
-    if (value.type() == typeid(std::string)) {
-      params.set(key, Teuchos::any_cast<std::string>(value));
-    } else if (value.type() == typeid(int)) {
-      params.set(key, Teuchos::any_cast<int>(value));
-    } else if (value.type() == typeid(double)) {
-      params.set(key, Teuchos::any_cast<double>(value));
-    } else if (value.type() == typeid(bool)) {
-      params.set(key, Teuchos::any_cast<bool>(value));
-    } else {
-      throw std::runtime_error("Unsupported candidate value type for '" + key + "'");
-    }
+    SetAnyParameterByPath(params, kv.first, kv.second);
   }
 }
 
@@ -475,20 +563,7 @@ void WriteResultsToParameterList(Teuchos::ParameterList& fullList,
   }
 
   if (gt.get("set best parameters on output", false)) {
-    for (const auto& kv : best) {
-      const auto& key = kv.first;
-      const auto& value = kv.second;
-
-      if (value.type() == typeid(std::string)) {
-        fullList.set(key, Teuchos::any_cast<std::string>(value));
-      } else if (value.type() == typeid(int)) {
-        fullList.set(key, Teuchos::any_cast<int>(value));
-      } else if (value.type() == typeid(double)) {
-        fullList.set(key, Teuchos::any_cast<double>(value));
-      } else if (value.type() == typeid(bool)) {
-        fullList.set(key, Teuchos::any_cast<bool>(value));
-      }
-    }
+    ApplyCandidateToParameterList(best, fullList);
   }
 }
 

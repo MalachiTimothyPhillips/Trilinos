@@ -2,7 +2,10 @@ ASSERT_DEFINED(Python3_EXECUTABLE)
 
 TRIBITS_COPY_FILES_TO_BINARY_DIR(
   MueLuGPTunePythonDemo_cp
-  SOURCE_FILES diffusion_gptune_demo.py
+  SOURCE_FILES
+    diffusion_gptune_demo.py
+    fake_muelu_gptune_worker.py
+    muelu_gptune_worker.py
 )
 
 IF(Python3_EXECUTABLE)

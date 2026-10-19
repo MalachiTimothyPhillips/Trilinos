@@ -127,6 +127,13 @@ TRIBITS_ADD_OPTION_AND_DEFINE(
   NO
 )
 
+TRIBITS_ADD_OPTION_AND_DEFINE(
+  ${PACKAGE_NAME}_ENABLE_GPTUNE_PYTHON_WORKER
+  HAVE_${PACKAGE_NAME_UC}_GPTUNE_PYTHON_WORKER
+  "Enable the optional external Python worker backend for MueLu-owned GPTune tuning."
+  NO
+)
+
 SET(${PACKAGE_NAME}_GPTUNE_PYTHONPATH "" CACHE STRING
   "Optional PYTHONPATH prefix for the MueLu GPTune Python demo, e.g. /path/to/GPTune")
 

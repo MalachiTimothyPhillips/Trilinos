@@ -10,12 +10,21 @@
 #ifndef MUELU_GPTUNEBRIDGE_HPP
 #define MUELU_GPTUNEBRIDGE_HPP
 
+#include <memory>
+
 #include <Teuchos_RCP.hpp>
 #include <Teuchos_TestForException.hpp>
 
 #include <Xpetra_Matrix.hpp>
 
+#include "MueLu_config.hpp"
+#include "MueLu_FixedTuningBackend.hpp"
 #include "MueLu_GPTuneParameterList.hpp"
+#ifdef HAVE_MUELU_GPTUNE_PYTHON_WORKER
+#include "MueLu_PythonWorkerTuningBackend.hpp"
+#endif
+#include "MueLu_TuningEvaluator.hpp"
+#include "MueLu_TuningLoop.hpp"
 
 namespace MueLu {
 namespace GPTuneInt {
@@ -28,51 +37,46 @@ struct BridgeResult {
   std::string message;
 };
 
-template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
-BridgeResult RunGPTuneBridge(const Teuchos::RCP<Xpetra::Matrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>>& /* op */,
-                             const Teuchos::ParameterList& baseParams,
-                             const Teuchos::ParameterList& /* fullParams */,
-                             const ParsedSpec& spec) {
-  BridgeResult result;
-  result.status = "success";
-  result.message = "GPTune bridge placeholder selected baseline parameter values from the base ParameterList.";
-
-  for (const auto& param : spec.search_parameters) {
-    if (param.has_initial_value) {
-      result.bestCandidate[param.muelu_key] = param.initial_value;
-      continue;
-    }
-
-    if (baseParams.isParameter(param.muelu_key)) {
-      const auto& entry = baseParams.getEntry(param.muelu_key);
-      if (entry.isType<std::string>()) {
-        result.bestCandidate[param.muelu_key] = baseParams.get<std::string>(param.muelu_key);
-      } else if (entry.isType<int>()) {
-        result.bestCandidate[param.muelu_key] = baseParams.get<int>(param.muelu_key);
-      } else if (entry.isType<double>()) {
-        result.bestCandidate[param.muelu_key] = baseParams.get<double>(param.muelu_key);
-      } else if (entry.isType<bool>()) {
-        result.bestCandidate[param.muelu_key] = baseParams.get<bool>(param.muelu_key);
-      } else {
-        TEUCHOS_TEST_FOR_EXCEPTION(true, std::runtime_error,
-                                   "Unsupported base ParameterList type for GPTune key '" << param.muelu_key << "'");
-      }
-      continue;
-    }
-
-    if (param.type == ParamType::Categorical) {
-      TEUCHOS_TEST_FOR_EXCEPTION(param.categorical_values.empty(), std::runtime_error,
-                                 "Categorical GPTune parameter '" << param.muelu_key << "' has empty values");
-      result.bestCandidate[param.muelu_key] = param.categorical_values.front();
-    } else if (param.type == ParamType::Integer) {
-      result.bestCandidate[param.muelu_key] = param.int_min;
-    } else {
-      result.bestCandidate[param.muelu_key] = param.real_min;
-    }
+inline std::unique_ptr<TuningBackend> CreateTuningBackend(const ParsedSpec& spec) {
+  switch (spec.backend) {
+    case Backend::Fixed:
+    case Backend::ExternalDriver:
+      return std::unique_ptr<TuningBackend>(new FixedTuningBackend());
+    case Backend::Python:
+#ifdef HAVE_MUELU_GPTUNE_PYTHON_WORKER
+      return std::unique_ptr<TuningBackend>(new PythonWorkerTuningBackend());
+#else
+      TEUCHOS_TEST_FOR_EXCEPTION(true, std::runtime_error,
+                                 "MueLu GPTune backend 'python' requires MueLu_ENABLE_GPTUNE_PYTHON_WORKER=ON and a gptune.worker.argv command");
+      break;
+#endif
+    case Backend::Embedded:
+      TEUCHOS_TEST_FOR_EXCEPTION(true, std::runtime_error,
+                                 "MueLu GPTune backend 'embedded' is not supported; use the external Python worker backend instead");
+      break;
   }
 
-  result.bestObjective = 0.0;
-  result.evaluationsPerformed = 0;
+  TEUCHOS_TEST_FOR_EXCEPTION(true, std::runtime_error,
+                             "Unknown MueLu GPTune backend");
+  return std::unique_ptr<TuningBackend>();
+}
+
+template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
+BridgeResult RunGPTuneBridge(const Teuchos::RCP<Xpetra::Matrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>>& op,
+                             const Teuchos::ParameterList& baseParams,
+                             const Teuchos::ParameterList& fullParams,
+                             const ParsedSpec& spec) {
+  BridgeResult result;
+
+  auto backend = CreateTuningBackend(spec);
+  MueLuHierarchyEvaluator<Scalar, LocalOrdinal, GlobalOrdinal, Node> evaluator(op, baseParams, fullParams, spec);
+  const auto summary = RunTuningLoop(spec, *backend, evaluator, baseParams);
+
+  result.bestCandidate = summary.bestCandidate;
+  result.bestObjective = summary.bestObjective;
+  result.evaluationsPerformed = summary.evaluationsPerformed;
+  result.status = summary.status;
+  result.message = summary.message;
   return result;
 }
 
