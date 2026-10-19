@@ -28,6 +28,7 @@ BackendSummary RunTuningLoop(const ParsedSpec& spec,
       break;
     }
 
+    evaluator.beginEvaluation(request.candidateId, evaluations);
     auto result = evaluator.evaluate(request.candidate);
     backend.tell(request.candidateId, request.candidate, result);
     ++evaluations;

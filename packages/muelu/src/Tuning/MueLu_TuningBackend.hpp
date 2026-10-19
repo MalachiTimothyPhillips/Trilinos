@@ -21,6 +21,8 @@ class CandidateEvaluator {
  public:
   virtual ~CandidateEvaluator() = default;
 
+  virtual void beginEvaluation(const std::string& /* candidateId */, int /* evaluationIndex */) {}
+
   virtual EvaluationResult evaluate(const Candidate& candidate) = 0;
 };
 

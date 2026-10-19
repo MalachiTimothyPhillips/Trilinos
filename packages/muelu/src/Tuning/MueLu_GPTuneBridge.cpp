@@ -13,7 +13,14 @@ namespace MueLu {
 namespace GPTuneInt {
 
 #define MUELU_ETI_GROUP(Scalar, LocalOrdinal, GlobalOrdinal, Node)                                            \
-  template BridgeResult RunGPTuneBridge<Scalar, LocalOrdinal, GlobalOrdinal, Node>(                          \
+  template StartupTuningResult<Scalar, LocalOrdinal, GlobalOrdinal, Node>                                    \
+  RunStartupTuning<Scalar, LocalOrdinal, GlobalOrdinal, Node>(                                               \
+      const Teuchos::RCP<Xpetra::Matrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>>& op,                    \
+      const Teuchos::ParameterList& baseParams,                                                              \
+      const Teuchos::ParameterList& fullParams,                                                              \
+      const ParsedSpec& spec);                                                                               \
+  template StartupTuningResult<Scalar, LocalOrdinal, GlobalOrdinal, Node>                                    \
+  RunGPTuneBridge<Scalar, LocalOrdinal, GlobalOrdinal, Node>(                                                \
       const Teuchos::RCP<Xpetra::Matrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>>& op,                    \
       const Teuchos::ParameterList& baseParams,                                                              \
       const Teuchos::ParameterList& fullParams,                                                              \

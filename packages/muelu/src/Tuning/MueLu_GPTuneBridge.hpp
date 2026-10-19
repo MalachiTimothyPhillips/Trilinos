@@ -19,6 +19,7 @@
 
 #include "MueLu_config.hpp"
 #include "MueLu_FixedTuningBackend.hpp"
+#include "MueLu_Hierarchy.hpp"
 #include "MueLu_GPTuneParameterList.hpp"
 #ifdef HAVE_MUELU_GPTUNE_PYTHON_WORKER
 #include "MueLu_PythonWorkerTuningBackend.hpp"
@@ -29,12 +30,11 @@
 namespace MueLu {
 namespace GPTuneInt {
 
-struct BridgeResult {
-  Candidate bestCandidate;
-  double bestObjective = 0.0;
-  int evaluationsPerformed = 0;
-  std::string status = "disabled";
-  std::string message;
+template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
+struct StartupTuningResult : public TuningRunSummary {
+  using Hierarchy = MueLu::Hierarchy<Scalar, LocalOrdinal, GlobalOrdinal, Node>;
+
+  Teuchos::RCP<Hierarchy> bestHierarchy;
 };
 
 inline std::unique_ptr<TuningBackend> CreateTuningBackend(const ParsedSpec& spec) {
@@ -62,22 +62,56 @@ inline std::unique_ptr<TuningBackend> CreateTuningBackend(const ParsedSpec& spec
 }
 
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
-BridgeResult RunGPTuneBridge(const Teuchos::RCP<Xpetra::Matrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>>& op,
-                             const Teuchos::ParameterList& baseParams,
-                             const Teuchos::ParameterList& fullParams,
-                             const ParsedSpec& spec) {
-  BridgeResult result;
+StartupTuningResult<Scalar, LocalOrdinal, GlobalOrdinal, Node>
+RunStartupTuning(const Teuchos::RCP<Xpetra::Matrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>>& op,
+                 const Teuchos::ParameterList& baseParams,
+                 const Teuchos::ParameterList& fullParams,
+                 const ParsedSpec& spec) {
+  StartupTuningResult<Scalar, LocalOrdinal, GlobalOrdinal, Node> result;
 
   auto backend = CreateTuningBackend(spec);
   MueLuHierarchyEvaluator<Scalar, LocalOrdinal, GlobalOrdinal, Node> evaluator(op, baseParams, fullParams, spec);
   const auto summary = RunTuningLoop(spec, *backend, evaluator, baseParams);
 
-  result.bestCandidate = summary.bestCandidate;
-  result.bestObjective = summary.bestObjective;
-  result.evaluationsPerformed = summary.evaluationsPerformed;
+  result.history = evaluator.history();
+  result.evaluationsPerformed = summary.evaluationsPerformed == 0 ? static_cast<int>(result.history.size())
+                                                                   : summary.evaluationsPerformed;
   result.status = summary.status;
   result.message = summary.message;
+
+  if (evaluator.hasBest()) {
+    result.hasBestCandidate = true;
+    result.bestCandidate = evaluator.bestCandidate();
+    result.bestObjective = evaluator.bestObjective();
+    result.bestParameterList = evaluator.bestParameterList();
+    result.bestHierarchy = evaluator.bestHierarchy();
+    result.hasRetainedHierarchy = !result.bestHierarchy.is_null();
+    if (result.status != "success") {
+      result.status = "success";
+    }
+    if (result.message.empty()) {
+      result.message = "MueLu startup tuning selected the best evaluated candidate.";
+    }
+  } else {
+    result.bestCandidate = summary.bestCandidate;
+    result.bestObjective = summary.bestObjective;
+    result.hasBestCandidate = !summary.bestCandidate.empty();
+    if (result.hasBestCandidate) {
+      result.bestParameterList = baseParams;
+      ApplyCandidateToParameterList(result.bestCandidate, result.bestParameterList);
+    }
+  }
+
   return result;
+}
+
+template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
+StartupTuningResult<Scalar, LocalOrdinal, GlobalOrdinal, Node>
+RunGPTuneBridge(const Teuchos::RCP<Xpetra::Matrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>>& op,
+                const Teuchos::ParameterList& baseParams,
+                const Teuchos::ParameterList& fullParams,
+                const ParsedSpec& spec) {
+  return RunStartupTuning<Scalar, LocalOrdinal, GlobalOrdinal, Node>(op, baseParams, fullParams, spec);
 }
 
 }  // namespace GPTuneInt

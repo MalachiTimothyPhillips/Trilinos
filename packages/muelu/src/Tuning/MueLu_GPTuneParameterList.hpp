@@ -151,6 +151,8 @@ struct ParsedSpec {
 
 using Candidate = std::map<std::string, Teuchos::any>;
 
+struct TuningRunSummary;
+
 ParsedSpec ParseAndValidateGPTuneList(const Teuchos::ParameterList& fullList);
 
 Teuchos::ParameterList StripGPTuneSublist(const Teuchos::ParameterList& fullList);
@@ -178,6 +180,10 @@ void WriteResultsToParameterList(Teuchos::ParameterList& fullList,
                                  int evaluationsPerformed,
                                  const std::string& status,
                                  const std::string& message);
+
+void WriteResultsToParameterList(Teuchos::ParameterList& fullList,
+                                 const TuningRunSummary& summary,
+                                 bool writeHistory = true);
 
 }  // namespace GPTuneInt
 }  // namespace MueLu

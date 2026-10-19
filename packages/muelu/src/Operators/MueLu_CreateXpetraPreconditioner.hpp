@@ -103,13 +103,20 @@ CreateXpetraPreconditioner(Teuchos::RCP<Xpetra::Matrix<Scalar, LocalOrdinal, Glo
 
     const auto parsedSpec = MueLu::GPTuneInt::ParseAndValidateGPTuneList(paramList);
     const auto baseParams = MueLu::GPTuneInt::StripGPTuneSublist(paramList);
-    const auto bridgeResult = MueLu::GPTuneInt::RunGPTuneBridge<SC, LO, GO, NO>(op, baseParams, inParamList, parsedSpec);
+    auto tuningResult = MueLu::GPTuneInt::RunStartupTuning<SC, LO, GO, NO>(op, baseParams, inParamList, parsedSpec);
 
     TEUCHOS_TEST_FOR_EXCEPTION(parsedSpec.mode == MueLu::GPTuneInt::Mode::TuneOnly, Exceptions::RuntimeError,
-                               "MueLu GPTune mode 'tune-only' needs a dedicated public tuning API and cannot return a usable preconditioner from CreateXpetraPreconditioner");
+                               "MueLu GPTune mode 'tune-only' cannot return a preconditioner from CreateXpetraPreconditioner; use RunStartupTuning for tune-only result inspection");
 
-    paramList = baseParams;
-    MueLu::GPTuneInt::ApplyCandidateToParameterList(bridgeResult.bestCandidate, paramList);
+    if (!tuningResult.bestHierarchy.is_null()) {
+      tuningResult.returnedRetainedHierarchy = true;
+      tm->stop();
+      tm->incrementNumCalls();
+      tm = Teuchos::null;
+      return tuningResult.bestHierarchy;
+    }
+
+    paramList = tuningResult.hasBestCandidate ? tuningResult.bestParameterList : baseParams;
 
     tm->stop();
     tm->incrementNumCalls();

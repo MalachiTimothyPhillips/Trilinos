@@ -24,9 +24,10 @@ When enabled, it:
 
 This Python-driver integration path remains the simplest end-to-end GPTune smoke
 test. The C++ `gptune` sublist in `CreatePreconditioner` now also has a
-MueLu-owned tuning loop with a fixed deterministic backend and an optional
+MueLu-owned startup tuning loop with a fixed deterministic backend and an optional
 external Python-worker backend. In that newer path, MueLu owns candidate
-application/evaluation and the worker only proposes candidates through a
+application/evaluation, records typed candidate history, can reuse the best
+evaluated hierarchy, and the worker only proposes candidates through a
 newline-delimited JSON ask/tell protocol.
 
 ## Configure Trilinos

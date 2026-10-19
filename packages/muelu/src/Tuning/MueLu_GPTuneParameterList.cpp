@@ -8,6 +8,7 @@
 // @HEADER
 
 #include "MueLu_GPTuneParameterList.hpp"
+#include "MueLu_TuningTypes.hpp"
 
 #include <set>
 #include <sstream>
@@ -532,6 +533,24 @@ bool IsActive(const SearchParameter& param,
   return true;
 }
 
+void WriteCandidateToParameterList(const Candidate& candidate,
+                                   Teuchos::ParameterList& out) {
+  for (const auto& kv : candidate) {
+    const auto& key = kv.first;
+    const auto& value = kv.second;
+
+    if (value.type() == typeid(std::string)) {
+      out.set(key, Teuchos::any_cast<std::string>(value));
+    } else if (value.type() == typeid(int)) {
+      out.set(key, Teuchos::any_cast<int>(value));
+    } else if (value.type() == typeid(double)) {
+      out.set(key, Teuchos::any_cast<double>(value));
+    } else if (value.type() == typeid(bool)) {
+      out.set(key, Teuchos::any_cast<bool>(value));
+    }
+  }
+}
+
 void WriteResultsToParameterList(Teuchos::ParameterList& fullList,
                                  const Candidate& best,
                                  double bestObjective,
@@ -546,24 +565,54 @@ void WriteResultsToParameterList(Teuchos::ParameterList& fullList,
   results.set("best objective", bestObjective);
   results.set("evaluations performed", evaluationsPerformed);
 
-  auto& bestPL = results.sublist("best parameters");
-  for (const auto& kv : best) {
-    const auto& key = kv.first;
-    const auto& value = kv.second;
-
-    if (value.type() == typeid(std::string)) {
-      bestPL.set(key, Teuchos::any_cast<std::string>(value));
-    } else if (value.type() == typeid(int)) {
-      bestPL.set(key, Teuchos::any_cast<int>(value));
-    } else if (value.type() == typeid(double)) {
-      bestPL.set(key, Teuchos::any_cast<double>(value));
-    } else if (value.type() == typeid(bool)) {
-      bestPL.set(key, Teuchos::any_cast<bool>(value));
-    }
-  }
+  WriteCandidateToParameterList(best, results.sublist("best parameters"));
 
   if (gt.get("set best parameters on output", false)) {
     ApplyCandidateToParameterList(best, fullList);
+  }
+}
+
+void WriteResultsToParameterList(Teuchos::ParameterList& fullList,
+                                 const TuningRunSummary& summary,
+                                 bool writeHistory) {
+  WriteResultsToParameterList(fullList,
+                              summary.bestCandidate,
+                              summary.bestObjective,
+                              summary.evaluationsPerformed,
+                              summary.status,
+                              summary.message);
+
+  auto& results = fullList.sublist("gptune").sublist("results");
+  results.set("has best candidate", summary.hasBestCandidate);
+  results.set("retained best hierarchy", summary.hasRetainedHierarchy);
+  results.set("returned retained hierarchy", summary.returnedRetainedHierarchy);
+
+  if (!summary.bestParameterList.name().empty() || summary.bestParameterList.numParams() > 0) {
+    results.sublist("best parameter list") = summary.bestParameterList;
+  }
+
+  if (writeHistory) {
+    auto& history = results.sublist("history");
+    int index = 0;
+    for (const auto& record : summary.history) {
+      auto& entry = history.sublist(std::to_string(index));
+      entry.set("evaluation index", record.evaluationIndex);
+      entry.set("candidate id", record.candidateId);
+      entry.set("objective", record.result.objective);
+      entry.set("status", record.result.status);
+      entry.set("message", record.result.message);
+      entry.set("retained as best", record.retainedAsBest);
+
+      auto& metrics = entry.sublist("metrics");
+      metrics.set("setup time", record.result.metrics.setupTime);
+      metrics.set("solve time", record.result.metrics.solveTime);
+      metrics.set("total time", record.result.metrics.totalTime);
+      metrics.set("iteration count", record.result.metrics.iterationCount);
+      metrics.set("converged", record.result.metrics.converged);
+
+      WriteCandidateToParameterList(record.candidate, entry.sublist("candidate"));
+      ++index;
+    }
   }
 }
 

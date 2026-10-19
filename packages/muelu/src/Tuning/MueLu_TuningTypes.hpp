@@ -11,6 +11,9 @@
 #define MUELU_TUNINGTYPES_HPP
 
 #include <string>
+#include <vector>
+
+#include <Teuchos_ParameterList.hpp>
 
 #include "MueLu_GPTuneParameterList.hpp"
 
@@ -37,6 +40,27 @@ struct CandidateRequest {
   bool stop = false;
   Candidate candidate;
   std::string candidateId;
+};
+
+struct CandidateEvaluationRecord {
+  int evaluationIndex = -1;
+  std::string candidateId;
+  Candidate candidate;
+  EvaluationResult result;
+  bool retainedAsBest = false;
+};
+
+struct TuningRunSummary {
+  Candidate bestCandidate;
+  double bestObjective = 0.0;
+  int evaluationsPerformed = 0;
+  std::string status = "disabled";
+  std::string message;
+  std::vector<CandidateEvaluationRecord> history;
+  Teuchos::ParameterList bestParameterList;
+  bool hasBestCandidate = false;
+  bool hasRetainedHierarchy = false;
+  bool returnedRetainedHierarchy = false;
 };
 
 struct BackendSummary {

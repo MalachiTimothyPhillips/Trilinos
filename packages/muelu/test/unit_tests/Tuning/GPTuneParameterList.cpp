@@ -18,6 +18,7 @@
 #include "MueLu_config.hpp"
 #include "MueLu_FixedTuningBackend.hpp"
 #include "MueLu_GPTuneParameterList.hpp"
+#include "MueLu_TuningEvaluator.hpp"
 #ifdef HAVE_MUELU_GPTUNE_PYTHON_WORKER
 #include "MueLu_PythonWorkerTuningBackend.hpp"
 #endif
@@ -70,6 +71,31 @@ TEUCHOS_UNIT_TEST(GPTuneParameterList, ParseMinimalValidSpec) {
   TEST_EQUALITY(spec.search_parameters.size(), 1);
   TEST_EQUALITY(spec.search_parameters[0].muelu_key, "relaxation: sweeps");
   TEST_EQUALITY(static_cast<int>(spec.search_parameters[0].type), static_cast<int>(MueLu::GPTuneInt::ParamType::Integer));
+}
+
+TEUCHOS_UNIT_TEST(GPTuneParameterList, ObjectiveFromMetricsUsesRequestedMetric) {
+  MueLu::GPTuneInt::ParsedSpec spec;
+  MueLu::GPTuneInt::EvaluationMetrics metrics;
+  metrics.setupTime = 2.0;
+  metrics.solveTime = 5.0;
+  metrics.totalTime = 7.0;
+  metrics.iterationCount = 11;
+
+  spec.objective = MueLu::GPTuneInt::Objective::SetupTime;
+  TEST_EQUALITY(MueLu::GPTuneInt::ObjectiveFromMetrics(spec, metrics), 2.0);
+
+  spec.objective = MueLu::GPTuneInt::Objective::SolveTime;
+  TEST_EQUALITY(MueLu::GPTuneInt::ObjectiveFromMetrics(spec, metrics), 5.0);
+
+  spec.objective = MueLu::GPTuneInt::Objective::TotalTime;
+  TEST_EQUALITY(MueLu::GPTuneInt::ObjectiveFromMetrics(spec, metrics), 7.0);
+
+  spec.objective = MueLu::GPTuneInt::Objective::IterationCount;
+  TEST_EQUALITY(MueLu::GPTuneInt::ObjectiveFromMetrics(spec, metrics), 11.0);
+
+  spec.objective = MueLu::GPTuneInt::Objective::AmortizedSolveTime;
+  spec.reuse_count = 4;
+  TEST_EQUALITY(MueLu::GPTuneInt::ObjectiveFromMetrics(spec, metrics), 5.5);
 }
 
 TEUCHOS_UNIT_TEST(GPTuneParameterList, ValidBackendsParse) {
@@ -407,6 +433,49 @@ TEUCHOS_UNIT_TEST(GPTuneParameterList, WriteResultsSetsNestedValuesWhenEnabled) 
   const auto& results = params.sublist("gptune").sublist("results");
   TEST_EQUALITY(results.sublist("best parameters").get<int>("smoother: params||relaxation: sweeps"), 4);
   TEST_EQUALITY(params.sublist("smoother: params").get<int>("relaxation: sweeps"), 4);
+}
+
+TEUCHOS_UNIT_TEST(GPTuneParameterList, WriteResultsFromSummaryIncludesHistory) {
+  Teuchos::ParameterList params;
+  params.sublist("gptune").set("set best parameters on output", false);
+
+  MueLu::GPTuneInt::TuningRunSummary summary;
+  summary.status = "success";
+  summary.message = "selected best candidate";
+  summary.bestObjective = 2.5;
+  summary.evaluationsPerformed = 1;
+  summary.hasBestCandidate = true;
+  summary.hasRetainedHierarchy = true;
+  summary.bestCandidate["max levels"] = 3;
+  summary.bestParameterList.set("max levels", 3);
+
+  MueLu::GPTuneInt::CandidateEvaluationRecord record;
+  record.evaluationIndex = 0;
+  record.candidateId = "candidate-0";
+  record.candidate["max levels"] = 3;
+  record.result.objective = 2.5;
+  record.result.status = "success";
+  record.result.metrics.setupTime = 1.0;
+  record.result.metrics.solveTime = 1.5;
+  record.result.metrics.totalTime = 2.5;
+  record.result.metrics.iterationCount = 7;
+  record.retainedAsBest = true;
+  summary.history.push_back(record);
+
+  MueLu::GPTuneInt::WriteResultsToParameterList(params, summary);
+
+  const auto& results = params.sublist("gptune").sublist("results");
+  TEST_EQUALITY(results.get<std::string>("status"), "success");
+  TEST_EQUALITY(results.get<bool>("has best candidate"), true);
+  TEST_EQUALITY(results.get<bool>("retained best hierarchy"), true);
+  TEST_EQUALITY(results.sublist("best parameters").get<int>("max levels"), 3);
+  TEST_EQUALITY(results.sublist("best parameter list").get<int>("max levels"), 3);
+
+  const auto& hist0 = results.sublist("history").sublist("0");
+  TEST_EQUALITY(hist0.get<std::string>("candidate id"), "candidate-0");
+  TEST_EQUALITY(hist0.get<bool>("retained as best"), true);
+  TEST_EQUALITY(hist0.sublist("metrics").get<int>("iteration count"), 7);
+  TEST_EQUALITY(hist0.sublist("candidate").get<int>("max levels"), 3);
 }
 
 TEUCHOS_UNIT_TEST(GPTuneParameterList, FixedBackendUsesInitialValueBeforeBaseValue) {

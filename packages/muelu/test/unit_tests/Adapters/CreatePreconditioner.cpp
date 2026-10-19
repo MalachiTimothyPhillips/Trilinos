@@ -28,6 +28,7 @@
 #include "MueLu_Utilities.hpp"
 
 #include "MueLu_CreateTpetraPreconditioner.hpp"
+#include "MueLu_GPTuneBridge.hpp"
 #include "MueLu_TpetraOperator.hpp"
 
 // #endif
@@ -427,6 +428,7 @@ TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(PetraOperator, CreatePreconditioner_GPTuneList
   gt.set("enabled", true);
   gt.set("backend", "external-driver");
   gt.set("objective", "setup time");
+  gt.sublist("evaluation").set("measure solve", false);
   auto& search = gt.sublist("search space");
   auto& maxLevels = search.sublist("max levels");
   maxLevels.set("type", "integer");
@@ -441,13 +443,129 @@ TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(PetraOperator, CreatePreconditioner_GPTuneList
   TEST_ASSERT(tH->GetHierarchy() != Teuchos::null);
 }
 
+TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(PetraOperator, StartupTuning_GPTuneTuneOnlyResult, Scalar, LocalOrdinal, GlobalOrdinal, Node) {
+#include "MueLu_UseShortNames.hpp"
+  MUELU_TESTING_SET_OSTREAM;
+  MUELU_TESTING_LIMIT_SCOPE(Scalar, GlobalOrdinal, Node);
+
+  using Teuchos::RCP;
+
+  Xpetra::UnderlyingLib lib = TestHelpers::Parameters::getLib();
+  if (lib != Xpetra::UseTpetra) {
+    TEUCHOS_TEST_FOR_EXCEPTION(true, MueLu::Exceptions::InvalidArgument, "Unknown Xpetra lib");
+  }
+
+  if (Teuchos::ScalarTraits<SC>::isComplex)
+    return;
+
+  GO nx = 125;
+  RCP<Matrix> Op = TestHelpers::TestFactory<SC, LO, GO, NO>::Build1DPoisson(nx, lib);
+
+  Teuchos::ParameterList params;
+  params.set("verbosity", "none");
+  params.set("max levels", 3);
+  params.set("coarse: max size", Teuchos::as<int>(100));
+  params.set("smoother: type", "RELAXATION");
+  params.sublist("smoother: params").set("relaxation: sweeps", 1);
+
+  auto& gt = params.sublist("gptune");
+  gt.set("enabled", true);
+  gt.set("mode", "tune-only");
+  gt.set("backend", "external-driver");
+  gt.set("objective", "setup time");
+  gt.set("max evaluations", 1);
+  gt.sublist("evaluation").set("measure solve", false);
+  auto& search = gt.sublist("search space");
+  auto& maxLevels = search.sublist("max levels");
+  maxLevels.set("type", "integer");
+  maxLevels.set("min", 2);
+  maxLevels.set("max", 3);
+  maxLevels.set("initial value", 2);
+
+  const auto spec = MueLu::GPTuneInt::ParseAndValidateGPTuneList(params);
+  const auto baseParams = MueLu::GPTuneInt::StripGPTuneSublist(params);
+  const auto result = MueLu::GPTuneInt::RunStartupTuning<SC, LO, GO, NO>(Op, baseParams, params, spec);
+
+  TEST_EQUALITY(result.status, "success");
+  TEST_EQUALITY(result.evaluationsPerformed, 1);
+  TEST_EQUALITY(result.history.size(), Teuchos::as<size_t>(1));
+  TEST_ASSERT(result.hasBestCandidate);
+  TEST_ASSERT(result.hasRetainedHierarchy);
+  TEST_ASSERT(!result.bestHierarchy.is_null());
+  TEST_EQUALITY(Teuchos::any_cast<int>(result.bestCandidate.at("max levels")), 2);
+  TEST_EQUALITY(result.bestParameterList.get<int>("max levels"), 2);
+}
+
+#ifdef HAVE_MUELU_BELOS
+TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(PetraOperator, CreatePreconditioner_GPTuneSolveTimeList, Scalar, LocalOrdinal, GlobalOrdinal, Node) {
+#include "MueLu_UseShortNames.hpp"
+  MUELU_TESTING_SET_OSTREAM;
+  MUELU_TESTING_LIMIT_SCOPE(Scalar, GlobalOrdinal, Node);
+
+  using Teuchos::RCP;
+
+  Xpetra::UnderlyingLib lib = TestHelpers::Parameters::getLib();
+  if (lib != Xpetra::UseTpetra) {
+    TEUCHOS_TEST_FOR_EXCEPTION(true, MueLu::Exceptions::InvalidArgument, "Unknown Xpetra lib");
+  }
+
+  if (Teuchos::ScalarTraits<SC>::isComplex)
+    return;
+
+  typedef Tpetra::Operator<SC, LO, GO, NO> tpetra_operator_type;
+
+  GO nx = 125;
+  RCP<Matrix> Op = TestHelpers::TestFactory<SC, LO, GO, NO>::Build1DPoisson(nx, lib);
+  RCP<Tpetra::CrsMatrix<SC, LO, GO, NO> > tpA = toTpetra(Op);
+
+  Teuchos::ParameterList params;
+  params.set("verbosity", "none");
+  params.set("max levels", 3);
+  params.set("coarse: max size", Teuchos::as<int>(100));
+  params.set("smoother: type", "RELAXATION");
+  params.sublist("smoother: params").set("relaxation: sweeps", 1);
+
+  auto& gt = params.sublist("gptune");
+  gt.set("enabled", true);
+  gt.set("backend", "external-driver");
+  gt.set("objective", "solve time");
+  auto& eval = gt.sublist("evaluation");
+  eval.set("solver", "cg");
+  eval.set("tolerance", 1.0e-8);
+  eval.set("max iterations", 50);
+  eval.set("measure setup", true);
+  eval.set("measure solve", true);
+  auto& search = gt.sublist("search space");
+  auto& sweeps = search.sublist("smoother: params||relaxation: sweeps");
+  sweeps.set("type", "integer");
+  sweeps.set("min", 1);
+  sweeps.set("max", 2);
+  sweeps.set("initial value", 1);
+
+  RCP<MueLu::TpetraOperator<SC, LO, GO, NO> > tH =
+      MueLu::CreateTpetraPreconditioner<SC, LO, GO, NO>(RCP<tpetra_operator_type>(tpA), params);
+
+  TEST_ASSERT(!tH.is_null());
+  TEST_ASSERT(tH->GetHierarchy() != Teuchos::null);
+}
+#endif
+
+#ifdef HAVE_MUELU_BELOS
+#define MUELU_GPTUNE_SOLVE_ETI(Scalar, LO, GO, Node) \
+  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(PetraOperator, CreatePreconditioner_GPTuneSolveTimeList, Scalar, LO, GO, Node)
+#else
+#define MUELU_GPTUNE_SOLVE_ETI(Scalar, LO, GO, Node)
+#endif
+
 #define MUELU_ETI_GROUP(Scalar, LO, GO, Node)                                                                    \
   TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(PetraOperator, CreatePreconditioner, Scalar, LO, GO, Node)                \
   TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(PetraOperator, CreatePreconditioner_XMLOnList, Scalar, LO, GO, Node)      \
   TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(PetraOperator, CreatePreconditioner_PDESystem, Scalar, LO, GO, Node)      \
   TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(PetraOperator, ReusePreconditioner, Scalar, LO, GO, Node)                 \
   TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(PetraOperator, ReusePreconditioner2, Scalar, LO, GO, Node)                \
-  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(PetraOperator, CreatePreconditioner_GPTuneList, Scalar, LO, GO, Node)
+  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(PetraOperator, CreatePreconditioner_GPTuneList, Scalar, LO, GO, Node)     \
+  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(PetraOperator, StartupTuning_GPTuneTuneOnlyResult, Scalar, LO, GO, Node)  \
+  MUELU_GPTUNE_SOLVE_ETI(Scalar, LO, GO, Node)
 
 #include <MueLu_ETI_4arg.hpp>
 

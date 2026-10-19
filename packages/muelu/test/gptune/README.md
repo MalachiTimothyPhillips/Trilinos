@@ -20,8 +20,10 @@ The integration test does the following:
 4. reports the best parameter set with a `GPTUNE_DEMO_BEST ...` line.
 
 The Python-driver integration path remains useful as an end-to-end GPTune smoke
-test.  The C++ `gptune` sublist now also has a MueLu-owned tuning loop with a
-fixed deterministic backend and an optional external Python-worker backend.  The
+test.  The C++ `gptune` sublist now also has a MueLu-owned startup tuning loop
+with a fixed deterministic backend and an optional external Python-worker backend.
+That path records typed candidate history, supports solve-oriented objectives,
+and can return the best evaluated hierarchy without a duplicate final setup.  The
 worker backend keeps Python/GPTune out of the Trilinos process: C++ sends an
 `init` JSON message, reads `candidate` messages, evaluates each candidate inside
 MueLu, sends `tell` messages with objectives, and receives a final `best`
