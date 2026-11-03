@@ -230,16 +230,16 @@ void MatrixLoad(Teuchos::RCP<const Teuchos::Comm<int> >& comm, Xpetra::Underlyin
 
   } else {
     if (!rowMapFile.empty())
-      map = Xpetra::IO<SC, LO, GO, Node>::ReadMap(rowMapFile, lib, comm);
+      map = Xpetra::IO<SC, LO, GO, Node>::ReadMap(rowMapFile, lib, comm, binaryFormat);
     comm->barrier();
 
     {
       RCP<TimeMonitor> tm = rcp(new TimeMonitor(*TimeMonitor::getNewTimer("Driver: 1a - Matrix read")));
-      if (!binaryFormat && !map.is_null()) {
-        RCP<const Map> colMap    = (!colMapFile.empty() ? Xpetra::IO<SC, LO, GO, Node>::ReadMap(colMapFile, lib, comm) : Teuchos::null);
-        RCP<const Map> domainMap = (!domainMapFile.empty() ? Xpetra::IO<SC, LO, GO, Node>::ReadMap(domainMapFile, lib, comm) : Teuchos::null);
-        RCP<const Map> rangeMap  = (!rangeMapFile.empty() ? Xpetra::IO<SC, LO, GO, Node>::ReadMap(rangeMapFile, lib, comm) : Teuchos::null);
-        A                        = Xpetra::IO<SC, LO, GO, Node>::Read(matrixFile, map, colMap, domainMap, rangeMap);
+      if (!map.is_null()) {
+        RCP<const Map> colMap    = (!colMapFile.empty() ? Xpetra::IO<SC, LO, GO, Node>::ReadMap(colMapFile, lib, comm, binaryFormat) : Teuchos::null);
+        RCP<const Map> domainMap = (!domainMapFile.empty() ? Xpetra::IO<SC, LO, GO, Node>::ReadMap(domainMapFile, lib, comm, binaryFormat) : Teuchos::null);
+        RCP<const Map> rangeMap  = (!rangeMapFile.empty() ? Xpetra::IO<SC, LO, GO, Node>::ReadMap(rangeMapFile, lib, comm, binaryFormat) : Teuchos::null);
+        A                        = Xpetra::IO<SC, LO, GO, Node>::Read(matrixFile, map, colMap, domainMap, rangeMap, true, binaryFormat);
 
       } else {
         A = Xpetra::IO<SC, LO, GO, Node>::Read(matrixFile, lib, comm, binaryFormat);
@@ -248,12 +248,14 @@ void MatrixLoad(Teuchos::RCP<const Teuchos::Comm<int> >& comm, Xpetra::Underlyin
     }  // timer scope
 
     // If no rowmap file has been provided and the driver is being run in parallel,
-    // create a uniformly distributed map and use it as A's row map.
-    if (map.is_null() && comm->getSize() > 1) {
+    // create a uniformly distributed map and use it as A's row map.  Binary files are
+    // already read in parallel (with the written distribution on as many ranks as wrote
+    // them, otherwise in contiguous blocks of rows), so they keep their distribution.
+    if (map.is_null() && comm->getSize() > 1 && !binaryFormat) {
       RCP<TimeMonitor> tm = rcp(new TimeMonitor(*TimeMonitor::getNewTimer("Driver: 1b - Matrix redistribute")));
       if (comm->getRank() == 0)
         std::cout << "No rowmap file specified, redistributing matrix using a uniformly distributed rowmap." << std::endl;
-      map = Xpetra::MapFactory<LO, GO, Node>::Build(lib, A->getRowMap()->getGlobalNumElements(), (int)0, comm);
+      map = Xpetra::MapFactory<LO, GO, Node>::Build(lib, A->getRowMap()->getGlobalNumElements(), A->getRowMap()->getIndexBase(), comm);
 
       RCP<Matrix> newMatrix = MatrixFactory::Build(map, 1);
       RCP<Import> importer  = ImportFactory::Build(A->getRowMap(), map);
@@ -272,10 +274,10 @@ void MatrixLoad(Teuchos::RCP<const Teuchos::Comm<int> >& comm, Xpetra::Underlyin
     RCP<TimeMonitor> tm = rcp(new TimeMonitor(*TimeMonitor::getNewTimer("Driver: 1c - Read coordinates")));
     RCP<const Map> coordMap;
     if (!coordMapFile.empty())
-      coordMap = Xpetra::IO<SC, LO, GO, Node>::ReadMap(coordMapFile, lib, comm);
+      coordMap = Xpetra::IO<SC, LO, GO, Node>::ReadMap(coordMapFile, lib, comm, binaryFormat);
     else
       coordMap = map;
-    coordinates = Xpetra::IO<real_type, LO, GO, Node>::ReadMultiVector(coordFile, coordMap);
+    coordinates = Xpetra::IO<real_type, LO, GO, Node>::ReadMultiVector(coordFile, coordMap, binaryFormat);
     comm->barrier();
   }
 
@@ -311,7 +313,7 @@ void MatrixLoad(Teuchos::RCP<const Teuchos::Comm<int> >& comm, Xpetra::Underlyin
 
   if (!nullFile.empty()) {
     RCP<TimeMonitor> tm = rcp(new TimeMonitor(*TimeMonitor::getNewTimer("Driver: 1e - Read nullspace")));
-    nullspace           = Xpetra::IO<SC, LO, GO, Node>::ReadMultiVector(nullFile, initialMap);
+    nullspace           = Xpetra::IO<SC, LO, GO, Node>::ReadMultiVector(nullFile, initialMap, binaryFormat);
     if (importer) {
       auto newNullspace = MultiVectorFactory::Build(map, nullspace->getNumVectors());
       newNullspace->doImport(*nullspace, *importer, Xpetra::INSERT);
@@ -322,7 +324,7 @@ void MatrixLoad(Teuchos::RCP<const Teuchos::Comm<int> >& comm, Xpetra::Underlyin
 
   if (!materialFile.empty() && needMaterial) {
     RCP<TimeMonitor> tm = rcp(new TimeMonitor(*TimeMonitor::getNewTimer("Driver: 1f - Read material")));
-    material            = Xpetra::IO<SC, LO, GO, Node>::ReadMultiVector(materialFile, initialMap);
+    material            = Xpetra::IO<SC, LO, GO, Node>::ReadMultiVector(materialFile, initialMap, binaryFormat);
     if (importer) {
       auto newMaterial = MultiVectorFactory::Build(map, material->getNumVectors());
       newMaterial->doImport(*material, *importer, Xpetra::INSERT);
@@ -333,13 +335,13 @@ void MatrixLoad(Teuchos::RCP<const Teuchos::Comm<int> >& comm, Xpetra::Underlyin
 
   if (!blockNumberFile.empty() && needBlockNumber) {
     RCP<TimeMonitor> tm = rcp(new TimeMonitor(*TimeMonitor::getNewTimer("Driver: 1g - Read block number")));
-    blocknumber         = Xpetra::IO<SC, LO, GO, Node>::ReadMultiVectorLO(blockNumberFile, map)->getVectorNonConst(0);
+    blocknumber         = Xpetra::IO<SC, LO, GO, Node>::ReadMultiVectorLO(blockNumberFile, map, binaryFormat)->getVectorNonConst(0);
     comm->barrier();
   }
 
   if (!massFile.empty() && needMass) {
     RCP<TimeMonitor> tm = rcp(new TimeMonitor(*TimeMonitor::getNewTimer("Driver: 1f - Read mass")));
-    mass                = Xpetra::IO<SC, LO, GO, Node>::Read(massFile, initialMap);
+    mass                = Xpetra::IO<SC, LO, GO, Node>::Read(massFile, initialMap, Teuchos::null, Teuchos::null, Teuchos::null, true, binaryFormat);
     if (importer) {
       Teuchos::ParameterList XpetraList;
       auto targetMap = importer->getTargetMap();
@@ -365,7 +367,7 @@ void MatrixLoad(Teuchos::RCP<const Teuchos::Comm<int> >& comm, Xpetra::Underlyin
   } else {
     // read in B
     RCP<TimeMonitor> tm = rcp(new TimeMonitor(*TimeMonitor::getNewTimer("Driver: 1h - Read RHS")));
-    B                   = Xpetra::IO<SC, LO, GO, Node>::ReadMultiVector(rhsFile, initialMap);
+    B                   = Xpetra::IO<SC, LO, GO, Node>::ReadMultiVector(rhsFile, initialMap, binaryFormat);
     if (importer) {
       auto newB = MultiVectorFactory::Build(map, B->getNumVectors());
       newB->doImport(*B, *importer, Xpetra::INSERT);
