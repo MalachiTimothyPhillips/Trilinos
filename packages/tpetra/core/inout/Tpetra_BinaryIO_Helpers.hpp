@@ -33,6 +33,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace Tpetra {
 namespace Details {
@@ -476,6 +477,39 @@ void binaryIOReadArrayCollective(const std::string& filename,
                                "Tpetra::BinaryIO: Failed to read array data from file '" << filename << "'.");
     current += static_cast<std::ptrdiff_t>(chunk);
     remaining -= chunk;
+  }
+}
+
+/// \brief Range [globalOffset, globalOffset + localCount) of map entries, in file order, that this
+///   rank reads from a map section.
+///
+/// A file read on as many ranks as it was written on keeps its distribution.  Otherwise the
+/// entries are split in file order into contiguous blocks of nearly equal size, so that a file can
+/// be read on any number of ranks.  Every reader derives its row, entry and vector offsets from
+/// this range, so all sections of a file stay consistent.
+inline void binaryIOMapSectionLocalRange(const std::string& filename,
+                                         const unsigned long long countsOffset,
+                                         const unsigned long long numWrittenRanks,
+                                         const unsigned long long globalCount,
+                                         const Teuchos::RCP<const Teuchos::Comm<int>>& comm,
+                                         unsigned long long& localCount,
+                                         unsigned long long& globalOffset) {
+  const unsigned long long rank     = static_cast<unsigned long long>(comm->getRank());
+  const unsigned long long numRanks = static_cast<unsigned long long>(comm->getSize());
+  if (numWrittenRanks != numRanks) {
+    const unsigned long long base      = globalCount / numRanks;
+    const unsigned long long remainder = globalCount % numRanks;
+    localCount                         = base + (rank < remainder ? 1ull : 0ull);
+    globalOffset                       = rank * base + std::min(rank, remainder);
+    return;
+  }
+
+  std::vector<unsigned long long> writtenCounts(binaryIOCheckedSize(numWrittenRanks, "map section rank count"));
+  binaryIOReadArrayFromRoot(filename, countsOffset, writtenCounts.data(), numWrittenRanks, comm);
+  localCount   = writtenCounts[rank];
+  globalOffset = 0;
+  for (unsigned long long r = 0; r < rank; ++r) {
+    globalOffset += writtenCounts[r];
   }
 }
 

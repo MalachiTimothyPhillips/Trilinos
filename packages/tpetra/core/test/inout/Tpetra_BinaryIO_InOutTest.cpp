@@ -801,11 +801,218 @@ TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(BinaryIO, OverwriteLargerExistingFile,
   cleanupFile(filename, comm);
 }
 
+// File-order GIDs for the different-rank-count tests: a permutation of indexBase .. indexBase+N-1
+// (N is not a multiple of 7), written from an imbalanced distribution with index base 1, to cover
+// a nonzero index base.
+long long redistributionFileGid(const long long position, const long long globalNumElts) {
+  return 1ll + (7ll * position) % globalNumElts;
+}
+
+long long redistributionGlobalNumElts(const Teuchos::Comm<int>& comm) {
+  long long globalNumElts = 5ll * comm.getSize() + 3ll;
+  if (globalNumElts % 7ll == 0) {
+    ++globalNumElts;
+  }
+  return globalNumElts;
+}
+
+// Written map: rank 0 owns everything but two entries per other rank, in file order.
+template <class LO, class GO, class Node>
+RCP<const Tpetra::Map<LO, GO, Node>>
+makeRedistributionWriteMap(const Teuchos::RCP<const Teuchos::Comm<int>>& comm) {
+  const long long globalNumElts = redistributionGlobalNumElts(*comm);
+  const long long numProcs      = comm->getSize();
+  const long long rank          = comm->getRank();
+  const long long rootCount     = globalNumElts - 2ll * (numProcs - 1ll);
+  const long long first         = rank == 0 ? 0ll : rootCount + 2ll * (rank - 1ll);
+  const long long count         = rank == 0 ? rootCount : 2ll;
+  Teuchos::Array<GO> gids;
+  for (long long k = first; k < first + count; ++k) {
+    gids.push_back(static_cast<GO>(redistributionFileGid(k, globalNumElts)));
+  }
+  return rcp(new Tpetra::Map<LO, GO, Node>(static_cast<global_size_t>(globalNumElts), gids(), static_cast<GO>(1), comm));
+}
+
+// Reading communicator with one rank fewer than the default communicator (the same single rank in
+// serial); null on the excluded rank.
+RCP<const Teuchos::Comm<int>> makeSmallerReadComm(const Teuchos::RCP<const Teuchos::Comm<int>>& comm) {
+  const int numReadRanks = std::max(1, comm->getSize() - 1);
+  return comm->split(comm->getRank() < numReadRanks ? 0 : -1, comm->getRank());
+}
+
+// The read map holds a balanced, contiguous range of the file order when the rank counts differ.
+template <class MapType>
+bool hasBalancedFileOrderGids(const MapType& map, const long long globalNumElts, const int numWriteRanks) {
+  const long long numReadRanks = map.getComm()->getSize();
+  const long long rank         = map.getComm()->getRank();
+  long long first              = 0;
+  long long count              = 0;
+  if (numReadRanks == numWriteRanks) {
+    const long long rootCount = globalNumElts - 2ll * (numReadRanks - 1ll);
+    first                     = rank == 0 ? 0ll : rootCount + 2ll * (rank - 1ll);
+    count                     = rank == 0 ? rootCount : 2ll;
+  } else {
+    const long long base      = globalNumElts / numReadRanks;
+    const long long remainder = globalNumElts % numReadRanks;
+    first                     = rank * base + std::min(rank, remainder);
+    count                     = base + (rank < remainder ? 1ll : 0ll);
+  }
+  bool same = static_cast<long long>(map.getLocalNumElements()) == count && map.getIndexBase() == 1;
+  for (long long i = 0; same && i < count; ++i) {
+    same = static_cast<long long>(map.getGlobalElement(static_cast<typename MapType::local_ordinal_type>(i))) ==
+           redistributionFileGid(first + i, globalNumElts);
+  }
+  int localSame = same ? 1 : 0;
+  int allSame   = 0;
+  Teuchos::reduceAll(*map.getComm(), Teuchos::REDUCE_MIN, 1, &localSame, &allSame);
+  return allSame != 0;
+}
+
+// Values written by makeDenseTestMultiVector.
+template <class MV>
+bool hasDenseTestValues(const MV& X) {
+  using impl_scalar_type = typename MV::impl_scalar_type;
+  auto localX            = X.getLocalViewHost(Tpetra::Access::ReadOnly);
+  const auto map         = X.getMap();
+  bool same              = true;
+  for (size_t i = 0; i < localX.extent(0); ++i) {
+    const auto gid = map->getGlobalElement(static_cast<typename MV::local_ordinal_type>(i));
+    for (size_t j = 0; j < localX.extent(1); ++j) {
+      same = same && localX(i, j) == static_cast<impl_scalar_type>(1000 + 100 * j + static_cast<size_t>(gid));
+    }
+  }
+  int localSame = same ? 1 : 0;
+  int allSame   = 0;
+  Teuchos::reduceAll(*map->getComm(), Teuchos::REDUCE_MIN, 1, &localSame, &allSame);
+  return allSame != 0;
+}
+
+// Rows written by makeTridiagonalMatrix on GIDs minGid .. maxGid.
+template <class MatrixType>
+bool hasTridiagonalTestRows(const MatrixType& A, const long long minGid, const long long maxGid) {
+  using GO       = typename MatrixType::global_ordinal_type;
+  using ST       = typename MatrixType::scalar_type;
+  const auto map = A.getRowMap();
+  bool same      = true;
+  for (size_t lclRow = 0; same && lclRow < map->getLocalNumElements(); ++lclRow) {
+    const GO gblRow = map->getGlobalElement(static_cast<typename MatrixType::local_ordinal_type>(lclRow));
+    std::vector<std::pair<GO, ST>> expected;
+    if (gblRow > minGid) {
+      expected.push_back(std::make_pair(static_cast<GO>(gblRow - 1), static_cast<ST>(-1)));
+    }
+    expected.push_back(std::make_pair(gblRow, static_cast<ST>(2 + (static_cast<size_t>(gblRow) % 7))));
+    if (gblRow < maxGid) {
+      expected.push_back(std::make_pair(static_cast<GO>(gblRow + 1), static_cast<ST>(-1)));
+    }
+
+    const size_t numEntries = A.getNumEntriesInGlobalRow(gblRow);
+    typename MatrixType::nonconst_global_inds_host_view_type inds("inds", numEntries);
+    typename MatrixType::nonconst_values_host_view_type vals("vals", numEntries);
+    size_t numRead = 0;
+    A.getGlobalRowCopy(gblRow, inds, vals, numRead);
+    std::vector<std::pair<GO, ST>> actual;
+    for (size_t k = 0; k < numRead; ++k) {
+      actual.push_back(std::make_pair(inds(k), static_cast<ST>(vals(k))));
+    }
+    std::sort(actual.begin(), actual.end());
+    same = actual == expected;
+  }
+  int localSame = same ? 1 : 0;
+  int allSame   = 0;
+  Teuchos::reduceAll(*map->getComm(), Teuchos::REDUCE_MIN, 1, &localSame, &allSame);
+  return allSame != 0;
+}
+
+TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(BinaryIO, MapReadOnFewerRanks,
+                                  ST, LO, GO, NODE) {
+  using binary_io_type = Tpetra::BinaryIO<ST, LO, GO, NODE>;
+
+  auto comm                     = Tpetra::getDefaultComm();
+  const long long globalNumElts = redistributionGlobalNumElts(*comm);
+  auto map                      = makeRedistributionWriteMap<LO, GO, NODE>(comm);
+  const std::string filename    = makeFilename("Tpetra_BinaryIO_MapReadOnFewerRanks", *comm);
+
+  binary_io_type::writeMapFile(filename, *map);
+  auto readComm = makeSmallerReadComm(comm);
+  if (!readComm.is_null()) {
+    auto inMap = Tpetra::readBinaryMapFile<LO, GO, NODE>(filename, readComm);
+    TEST_EQUALITY(static_cast<long long>(inMap->getGlobalNumElements()), globalNumElts);
+    TEST_ASSERT(hasBalancedFileOrderGids(*inMap, globalNumElts, comm->getSize()));
+    auto inMapBinaryIO = binary_io_type::readMapFile(filename, readComm);
+    TEST_ASSERT(inMapBinaryIO->isSameAs(*inMap));
+  }
+  cleanupFile(filename, comm);
+}
+
+TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(BinaryIO, DenseReadOnFewerRanks,
+                                  ST, LO, GO, NODE) {
+  using map_type       = Tpetra::Map<LO, GO, NODE>;
+  using binary_io_type = Tpetra::BinaryIO<ST, LO, GO, NODE>;
+
+  auto comm                     = Tpetra::getDefaultComm();
+  const long long globalNumElts = redistributionGlobalNumElts(*comm);
+  auto map                      = makeRedistributionWriteMap<LO, GO, NODE>(comm);
+  auto X                        = makeDenseTestMultiVector<ST, LO, GO, NODE>(map, 2);
+  const std::string filename    = makeFilename("Tpetra_BinaryIO_DenseReadOnFewerRanks", *comm);
+
+  binary_io_type::writeDenseFile(filename, *X);
+  auto readComm = makeSmallerReadComm(comm);
+  if (!readComm.is_null()) {
+    auto Y = binary_io_type::readDenseFile(filename, readComm);
+    TEST_EQUALITY(Y->getNumVectors(), size_t(2));
+    TEST_ASSERT(hasBalancedFileOrderGids(*Y->getMap(), globalNumElts, comm->getSize()));
+    TEST_ASSERT(hasDenseTestValues(*Y));
+
+    // Into a caller-provided map, as when reading a vector onto a matrix row map.
+    RCP<const map_type> targetMap = rcp(new map_type(static_cast<global_size_t>(globalNumElts), static_cast<GO>(1), readComm));
+    auto Z                        = binary_io_type::readDenseFile(filename, targetMap);
+    TEST_ASSERT(Z->getMap()->isSameAs(*targetMap));
+    TEST_ASSERT(hasDenseTestValues(*Z));
+  }
+  cleanupFile(filename, comm);
+}
+
+TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(BinaryIO, SparseReadOnFewerRanks,
+                                  ST, LO, GO, NODE) {
+  using map_type       = Tpetra::Map<LO, GO, NODE>;
+  using binary_io_type = Tpetra::BinaryIO<ST, LO, GO, NODE>;
+
+  auto comm                     = Tpetra::getDefaultComm();
+  const long long globalNumElts = redistributionGlobalNumElts(*comm);
+  auto map                      = makeRedistributionWriteMap<LO, GO, NODE>(comm);
+  auto A                        = makeTridiagonalMatrix<ST, LO, GO, NODE>(map);
+  const std::string filename    = makeFilename("Tpetra_BinaryIO_SparseReadOnFewerRanks", *comm);
+
+  binary_io_type::writeSparseFile(filename, *A);
+  const global_size_t globalNumEntries = A->getGlobalNumEntries();
+  auto readComm                        = makeSmallerReadComm(comm);
+  if (!readComm.is_null()) {
+    auto B = binary_io_type::readSparseFile(filename, readComm);
+    TEST_EQUALITY(B->getGlobalNumRows(), static_cast<global_size_t>(globalNumElts));
+    TEST_EQUALITY(B->getGlobalNumEntries(), globalNumEntries);
+    TEST_ASSERT(hasBalancedFileOrderGids(*B->getRowMap(), globalNumElts, comm->getSize()));
+    TEST_ASSERT(B->getDomainMap()->isSameAs(*B->getRowMap()));
+    TEST_ASSERT(B->getRangeMap()->isSameAs(*B->getRowMap()));
+    TEST_ASSERT(hasTridiagonalTestRows(*B, 1, globalNumElts));
+
+    // Onto caller-provided maps, as Xpetra::IO::Read(filename, rowMap, ...) does.
+    RCP<const map_type> targetMap = rcp(new map_type(static_cast<global_size_t>(globalNumElts), static_cast<GO>(1), readComm));
+    auto C                        = binary_io_type::readSparseFile(filename, targetMap, targetMap, targetMap, true);
+    TEST_ASSERT(C->getRowMap()->isSameAs(*targetMap));
+    TEST_EQUALITY(C->getGlobalNumEntries(), globalNumEntries);
+    TEST_ASSERT(hasTridiagonalTestRows(*C, 1, globalNumElts));
+  }
+  cleanupFile(filename, comm);
+}
+
 #if defined(HAVE_TPETRA_INST_DOUBLE)
 #define UNIT_TEST_GROUP(LO, GO, NODE)                                                                      \
   TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(BinaryIO, MapRoundTrip, double, LO, GO, NODE)                       \
   TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(BinaryIO, MapRoundTripImbalancedContiguous, double, LO, GO, NODE)   \
   TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(BinaryIO, MapRoundTripLargeGIDs, double, LO, GO, NODE)              \
+  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(BinaryIO, MapReadOnFewerRanks, double, LO, GO, NODE)                \
+  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(BinaryIO, DenseReadOnFewerRanks, double, LO, GO, NODE)              \
+  TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(BinaryIO, SparseReadOnFewerRanks, double, LO, GO, NODE)             \
   TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(BinaryIO, DenseRoundTripDefaultMap, double, LO, GO, NODE)           \
   TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(BinaryIO, DenseRoundTripCustomMap, double, LO, GO, NODE)            \
   TEUCHOS_UNIT_TEST_TEMPLATE_4_INSTANT(BinaryIO, DenseRoundTripSmallChunks, double, LO, GO, NODE)          \

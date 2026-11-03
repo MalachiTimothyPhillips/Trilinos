@@ -544,25 +544,10 @@ BinaryIO<Scalar, LocalOrdinal, GlobalOrdinal, Node>::readMapSection(const std::s
   const MapSectionHeader sectionHeader = readMapSectionHeader(filename, mapSectionOffset, comm);
   const unsigned long long globalCount = sectionHeader.numGlobalElements;
 
-  TEUCHOS_TEST_FOR_EXCEPTION(sectionHeader.numRanks != static_cast<unsigned long long>(comm->getSize()),
-                             std::runtime_error,
-                             "Tpetra::BinaryIO: Map section was written for " << sectionHeader.numRanks
-                                                                              << " ranks, but the read communicator has "
-                                                                              << comm->getSize() << " ranks.");
-
-  Kokkos::View<unsigned long long*, Kokkos::HostSpace> localCounts("Tpetra::BinaryIO::mapLocalCounts",
-                                                                   Details::binaryIOCheckedSize(sectionHeader.numRanks, "map section rank count"));
-  Details::binaryIOReadArrayFromRoot(filename,
-                                     mapSectionCountsOffset(mapSectionOffset),
-                                     localCounts.data(),
-                                     static_cast<unsigned long long>(localCounts.extent(0)),
-                                     comm);
-
-  const unsigned long long localCount = localCounts(comm->getRank());
-  unsigned long long globalOffset     = 0;
-  for (int rank = 0; rank < comm->getRank(); ++rank) {
-    globalOffset += localCounts(rank);
-  }
+  unsigned long long localCount   = 0;
+  unsigned long long globalOffset = 0;
+  Details::binaryIOMapSectionLocalRange(filename, mapSectionCountsOffset(mapSectionOffset), sectionHeader.numRanks,
+                                        globalCount, comm, localCount, globalOffset);
 
   Kokkos::View<GlobalOrdinal*, Kokkos::HostSpace> gids("Tpetra::BinaryIO::mapGids",
                                                        Details::binaryIOCheckedSize(localCount, "map section local element count"));

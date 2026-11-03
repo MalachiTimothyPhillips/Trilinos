@@ -32,8 +32,10 @@ namespace Tpetra {
 /// \brief Read a Tpetra::Map from a file in Tpetra's binary I/O format.
 ///
 /// \param filename [in] Name of the binary file to read.
-/// \param comm [in] Communicator over which to distribute the map.  It must
-///   have the same number of ranks as were used when the file was written.
+/// \param comm [in] Communicator over which to distribute the map.  With as
+///   many ranks as the file was written on, each rank gets the entries it
+///   wrote; otherwise the entries are split in file order into contiguous
+///   blocks of nearly equal size.
 template <class LocalOrdinal, class GlobalOrdinal, class Node>
 Teuchos::RCP<const Tpetra::Map<LocalOrdinal, GlobalOrdinal, Node>>
 readBinaryMapFile(const std::string& filename,

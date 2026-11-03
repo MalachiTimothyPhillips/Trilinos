@@ -12,6 +12,11 @@
 
 /// \file Tpetra_BinaryIO_decl.hpp
 /// \brief Declarations of scalable binary file readers and writers for Tpetra objects.
+///
+/// Files can be read on any number of ranks.  On as many ranks as a file was
+/// written on, the readers return the written distribution; otherwise each map
+/// in the file is split in file order into contiguous blocks of nearly equal
+/// size, and rows and vector entries follow their map.
 
 #include "Tpetra_CrsGraph.hpp"
 #include "Tpetra_CrsMatrix.hpp"
