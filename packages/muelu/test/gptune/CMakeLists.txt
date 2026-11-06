@@ -17,6 +17,7 @@ IF(Python3_EXECUTABLE)
     SET(MUELU_GPTUNE_DEMO_PYTHONPATH "${${PACKAGE_NAME}_GPTUNE_PYTHONPATH}")
   ENDIF()
 
+  IF(${PACKAGE_NAME}_ENABLE_GPTUNE_PYTHON_DEMO)
   TRIBITS_ADD_TEST(
     ${Python3_EXECUTABLE}
     NOEXEPREFIX
@@ -29,4 +30,22 @@ IF(Python3_EXECUTABLE)
     PASS_REGULAR_EXPRESSION "GPTUNE_DEMO_(BEST|SKIP)"
     ENVIRONMENT "PYTHONPATH=${MUELU_GPTUNE_DEMO_PYTHONPATH}"
   )
+  ENDIF()
+
+  IF(${PACKAGE_NAME}_ENABLE_GPTUNE_PYTHON_WORKER)
+    # MueLu-owned tuning driven purely by the gptune sublist of an XML input.
+    CONFIGURE_FILE(gptune_worker_poisson.xml.in
+                   ${CMAKE_CURRENT_BINARY_DIR}/gptune_worker_poisson.xml @ONLY)
+
+    TRIBITS_ADD_TEST(
+      Driver
+      NAME GPTuneWorkerXMLPoisson
+      DIRECTORY ../scaling
+      ARGS "--xml=gptune_worker_poisson.xml --matrixType=Laplace2D --nx=60 --ny=60"
+      NUM_MPI_PROCS 2
+      COMM serial mpi
+      PASS_REGULAR_EXPRESSION "Belos converged"
+      ENVIRONMENT "PYTHONPATH=${MUELU_GPTUNE_DEMO_PYTHONPATH}"
+    )
+  ENDIF()
 ENDIF()

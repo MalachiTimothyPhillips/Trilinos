@@ -66,6 +66,15 @@ python3 /path/to/muelu_gptune_worker.py
 The deterministic `fake_muelu_gptune_worker.py` script uses the same protocol and
 is intended for process/protocol tests that should not import GPTune.
 
+`muelu_gptune_worker.py` runs GPTune's own `MLA` loop; each GPTune objective
+call becomes a `candidate` message that MueLu evaluates.  Under MPI only rank 0
+launches the worker, and candidate timings are max-reduced across ranks, so all
+ranks retain the same hierarchy.  `gptune_worker_poisson.xml.in` is a complete
+XML-only example (`smoother: params||relaxation: sweeps` and `damping factor`,
+iteration-count objective); with the worker option enabled it is run by the
+`GPTuneWorkerXMLPoisson` test on two ranks.  Parameters with `active if`
+clauses are always sent to GPTune as active.
+
 A known-good local configuration used during development was:
 
 ```bash

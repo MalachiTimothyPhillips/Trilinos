@@ -352,7 +352,8 @@ std::string BuildWorkerInitMessage(const ParsedSpec& spec) {
     } else if (param.type == ParamType::Integer) {
       os << ",\"min\":" << param.int_min << ",\"max\":" << param.int_max << ",\"step\":" << param.int_step;
     } else {
-      os << ",\"min\":" << param.real_min << ",\"max\":" << param.real_max << ",\"step\":" << param.real_step;
+      os << ",\"min\":" << param.real_min << ",\"max\":" << param.real_max << ",\"step\":" << param.real_step
+         << ",\"transform\":" << quote(param.transform == Transform::Log ? "log" : "none");
     }
     if (param.has_initial_value) {
       os << ",\"initial_value\":" << anyToJson(param.initial_value);

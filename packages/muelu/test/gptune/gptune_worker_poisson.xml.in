@@ -1,0 +1,41 @@
+<ParameterList name="MueLu">
+  <Parameter name="verbosity" type="string" value="none"/>
+  <Parameter name="max levels" type="int" value="4"/>
+  <Parameter name="coarse: max size" type="int" value="100"/>
+  <Parameter name="smoother: type" type="string" value="RELAXATION"/>
+  <ParameterList name="smoother: params">
+    <Parameter name="relaxation: type" type="string" value="Jacobi"/>
+    <Parameter name="relaxation: sweeps" type="int" value="1"/>
+    <Parameter name="relaxation: damping factor" type="double" value="0.7"/>
+  </ParameterList>
+
+  <ParameterList name="gptune">
+    <Parameter name="enabled" type="bool" value="true"/>
+    <Parameter name="backend" type="string" value="python"/>
+    <Parameter name="objective" type="string" value="iteration count"/>
+    <Parameter name="max evaluations" type="int" value="6"/>
+    <Parameter name="seed" type="int" value="1"/>
+    <ParameterList name="evaluation">
+      <Parameter name="solver" type="string" value="cg"/>
+      <Parameter name="tolerance" type="double" value="1e-8"/>
+      <Parameter name="max iterations" type="int" value="200"/>
+    </ParameterList>
+    <ParameterList name="worker">
+      <Parameter name="argv" type="Array(string)" value="{@Python3_EXECUTABLE@, @CMAKE_CURRENT_SOURCE_DIR@/muelu_gptune_worker.py}"/>
+      <Parameter name="startup timeout seconds" type="int" value="120"/>
+      <Parameter name="request timeout seconds" type="int" value="300"/>
+    </ParameterList>
+    <ParameterList name="search space">
+      <ParameterList name="smoother: params||relaxation: sweeps">
+        <Parameter name="type" type="string" value="integer"/>
+        <Parameter name="min" type="int" value="1"/>
+        <Parameter name="max" type="int" value="4"/>
+      </ParameterList>
+      <ParameterList name="smoother: params||relaxation: damping factor">
+        <Parameter name="type" type="string" value="real"/>
+        <Parameter name="min" type="double" value="0.5"/>
+        <Parameter name="max" type="double" value="1.0"/>
+      </ParameterList>
+    </ParameterList>
+  </ParameterList>
+</ParameterList>
