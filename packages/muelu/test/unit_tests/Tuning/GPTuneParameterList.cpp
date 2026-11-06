@@ -13,6 +13,8 @@
 #include <Teuchos_RCP.hpp>
 #include <Teuchos_any.hpp>
 
+#include <Teuchos_CommHelpers.hpp>
+#include <Tpetra_Core.hpp>
 #include <Tpetra_Map.hpp>
 
 #include "MueLu_config.hpp"
@@ -304,6 +306,56 @@ TEUCHOS_UNIT_TEST(GPTuneParameterList, PythonWorkerBackendUsesFakeWorker) {
   TEST_EQUALITY(summary.status, "success");
   TEST_EQUALITY(summary.evaluationsPerformed, 2);
   TEST_EQUALITY(Teuchos::any_cast<int>(summary.bestCandidate.at("relaxation: sweeps")), 1);
+}
+
+TEUCHOS_UNIT_TEST(GPTuneParameterList, PythonWorkerBackendAgreesAcrossRanks) {
+  auto comm = Tpetra::getDefaultComm();
+  Teuchos::ParameterList baseParams;
+
+  MueLu::GPTuneInt::ParsedSpec spec;
+  spec.enabled = true;
+  spec.backend = MueLu::GPTuneInt::Backend::Python;
+  spec.max_evaluations = 2;
+  spec.worker.argv = {"python3", MUELU_GPTUNE_FAKE_WORKER};
+  spec.worker.request_timeout_seconds = 10;
+
+  MueLu::GPTuneInt::SearchParameter sweeps;
+  sweeps.muelu_key = "relaxation: sweeps";
+  sweeps.type = MueLu::GPTuneInt::ParamType::Integer;
+  sweeps.has_int_bounds = true;
+  sweeps.int_min = 1;
+  sweeps.int_max = 4;
+  sweeps.has_initial_value = true;
+  sweeps.initial_value = 4;
+  spec.search_parameters.push_back(sweeps);
+
+  // Non-root ranks prefer the opposite candidate; only rank 0's worker decides.
+  class RankEvaluator : public SumEvaluator {
+   public:
+    explicit RankEvaluator(int rank) : rank_(rank) {}
+    MueLu::GPTuneInt::EvaluationResult evaluate(const MueLu::GPTuneInt::Candidate& candidate) override {
+      auto result = SumEvaluator::evaluate(candidate);
+      if (rank_ != 0) result.objective = -result.objective;
+      return result;
+    }
+
+   private:
+    int rank_;
+  };
+
+  MueLu::GPTuneInt::PythonWorkerTuningBackend backend(comm);
+  RankEvaluator evaluator(comm->getRank());
+  const auto summary = MueLu::GPTuneInt::RunTuningLoop(spec, backend, evaluator, baseParams);
+
+  const int best = Teuchos::any_cast<int>(summary.bestCandidate.at("relaxation: sweeps"));
+  int minBest = 0, maxBest = 0;
+  Teuchos::reduceAll<int, int>(*comm, Teuchos::REDUCE_MIN, best, Teuchos::outArg(minBest));
+  Teuchos::reduceAll<int, int>(*comm, Teuchos::REDUCE_MAX, best, Teuchos::outArg(maxBest));
+
+  TEST_EQUALITY(summary.status, "success");
+  TEST_EQUALITY(summary.evaluationsPerformed, 2);
+  TEST_EQUALITY(minBest, 1);
+  TEST_EQUALITY(maxBest, 1);
 }
 #endif
 

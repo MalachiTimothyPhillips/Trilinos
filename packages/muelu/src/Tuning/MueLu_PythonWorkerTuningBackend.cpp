@@ -11,6 +11,7 @@
 
 #include <stdexcept>
 
+#include <Teuchos_CommHelpers.hpp>
 #include <Teuchos_TestForException.hpp>
 
 namespace MueLu {
@@ -27,17 +28,50 @@ void PythonWorkerTuningBackend::initialize(const ParsedSpec& spec,
   summary_.message = "Python GPTune worker is running.";
   haveSummary_ = false;
 
-  worker_.start(spec_.worker.argv);
+  const auto readyLine = onRoot([this]() {
+    worker_.start(spec_.worker.argv);
+    worker_.writeLine(BuildWorkerInitMessage(spec_));
+    return worker_.readLine(spec_.worker.startup_timeout_seconds);
+  });
   running_ = true;
 
-  worker_.writeLine(BuildWorkerInitMessage(spec_));
-  const auto ready = readWorkerMessage();
+  const auto ready = ParseWorkerMessage(readyLine, spec_);
   TEUCHOS_TEST_FOR_EXCEPTION(ready.type != "ready", std::runtime_error,
                              "Expected GPTune worker 'ready' message but received '" << ready.type << "'");
 }
 
+bool PythonWorkerTuningBackend::isRoot() const {
+  return comm_.is_null() || comm_->getRank() == 0;
+}
+
+std::string PythonWorkerTuningBackend::onRoot(const std::function<std::string()>& action) {
+  int ok = 1;
+  std::string payload;
+  if (isRoot()) {
+    try {
+      payload = action();
+    } catch (const std::exception& exc) {
+      ok      = 0;
+      payload = exc.what();
+    }
+  }
+
+  if (!comm_.is_null() && comm_->getSize() > 1) {
+    int length = static_cast<int>(payload.size());
+    Teuchos::broadcast<int, int>(*comm_, 0, &ok);
+    Teuchos::broadcast<int, int>(*comm_, 0, &length);
+    payload.resize(length);
+    if (length > 0)
+      Teuchos::broadcast<int, char>(*comm_, 0, length, &payload[0]);
+  }
+
+  TEUCHOS_TEST_FOR_EXCEPTION(!ok, std::runtime_error, payload);
+  return payload;
+}
+
 WorkerMessage PythonWorkerTuningBackend::readWorkerMessage() {
-  return ParseWorkerMessage(worker_.readLine(spec_.worker.request_timeout_seconds), spec_);
+  return ParseWorkerMessage(onRoot([this]() { return worker_.readLine(spec_.worker.request_timeout_seconds); }),
+                            spec_);
 }
 
 CandidateRequest PythonWorkerTuningBackend::ask() {
@@ -84,7 +118,11 @@ void PythonWorkerTuningBackend::tell(const std::string& candidateId,
                                      const EvaluationResult& result) {
   TEUCHOS_TEST_FOR_EXCEPTION(!running_, std::runtime_error,
                              "Cannot tell GPTune worker before it is running");
-  worker_.writeLine(BuildWorkerTellMessage(candidateId, candidate, result));
+  const auto message = BuildWorkerTellMessage(candidateId, candidate, result);
+  onRoot([this, &message]() {
+    worker_.writeLine(message);
+    return std::string();
+  });
 }
 
 BackendSummary PythonWorkerTuningBackend::finalize() {
@@ -109,14 +147,14 @@ BackendSummary PythonWorkerTuningBackend::finalize() {
 }
 
 void PythonWorkerTuningBackend::shutdown() {
-  if (running_) {
+  if (running_ && isRoot()) {
     try {
       worker_.writeLine(BuildWorkerShutdownMessage());
     } catch (...) {
     }
     worker_.shutdown();
-    running_ = false;
   }
+  running_ = false;
 }
 
 }  // namespace GPTuneInt

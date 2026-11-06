@@ -12,6 +12,7 @@
 
 #include <memory>
 
+#include <Teuchos_Comm.hpp>
 #include <Teuchos_RCP.hpp>
 #include <Teuchos_TestForException.hpp>
 
@@ -37,14 +38,15 @@ struct StartupTuningResult : public TuningRunSummary {
   Teuchos::RCP<Hierarchy> bestHierarchy;
 };
 
-inline std::unique_ptr<TuningBackend> CreateTuningBackend(const ParsedSpec& spec) {
+inline std::unique_ptr<TuningBackend> CreateTuningBackend(const ParsedSpec& spec,
+                                                          const Teuchos::RCP<const Teuchos::Comm<int>>& comm = Teuchos::null) {
   switch (spec.backend) {
     case Backend::Fixed:
     case Backend::ExternalDriver:
       return std::unique_ptr<TuningBackend>(new FixedTuningBackend());
     case Backend::Python:
 #ifdef HAVE_MUELU_GPTUNE_PYTHON_WORKER
-      return std::unique_ptr<TuningBackend>(new PythonWorkerTuningBackend());
+      return std::unique_ptr<TuningBackend>(new PythonWorkerTuningBackend(comm));
 #else
       TEUCHOS_TEST_FOR_EXCEPTION(true, std::runtime_error,
                                  "MueLu GPTune backend 'python' requires MueLu_ENABLE_GPTUNE_PYTHON_WORKER=ON and a gptune.worker.argv command");
@@ -69,7 +71,7 @@ RunStartupTuning(const Teuchos::RCP<Xpetra::Matrix<Scalar, LocalOrdinal, GlobalO
                  const ParsedSpec& spec) {
   StartupTuningResult<Scalar, LocalOrdinal, GlobalOrdinal, Node> result;
 
-  auto backend = CreateTuningBackend(spec);
+  auto backend = CreateTuningBackend(spec, op->getDomainMap()->getComm());
   MueLuHierarchyEvaluator<Scalar, LocalOrdinal, GlobalOrdinal, Node> evaluator(op, baseParams, fullParams, spec);
   const auto summary = RunTuningLoop(spec, *backend, evaluator, baseParams);
 

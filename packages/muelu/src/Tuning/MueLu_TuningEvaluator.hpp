@@ -16,6 +16,7 @@
 #include <string>
 #include <utility>
 
+#include <Teuchos_CommHelpers.hpp>
 #include <Teuchos_Time.hpp>
 #include <Teuchos_TimeMonitor.hpp>
 #include <Teuchos_TestForException.hpp>
@@ -157,27 +158,42 @@ class MueLuHierarchyEvaluator final : public CandidateEvaluator {
         TEUCHOS_TEST_FOR_EXCEPTION(true, std::runtime_error,
                                    "Selected MueLu GPTune objective requires solve measurement");
       }
-
-      result.metrics.totalTime = 0.0;
-      if (spec_.evaluation.measure_setup) {
-        result.metrics.totalTime += result.metrics.setupTime;
-      }
-      if (spec_.evaluation.measure_solve) {
-        result.metrics.totalTime += result.metrics.solveTime;
-      }
-
-      if (!result.metrics.converged && spec_.evaluation.fail_on_nonconvergence) {
-        result.objective = spec_.failure_penalty;
-        result.status = "failed";
-      } else {
-        result.objective = ObjectiveFromMetrics(spec_, result.metrics);
-        result.status = "success";
-      }
     } catch (const std::exception& exc) {
-      result.objective = spec_.failure_penalty;
       result.status = "failed";
       result.message = exc.what();
       result.metrics.converged = false;
+    }
+
+    // Ranks time candidates independently; use the slowest rank and a shared
+    // failure flag so every rank scores and retains the same candidate.
+    const auto comm = op_->getDomainMap()->getComm();
+    double local[3] = {result.status == "failed" ? 1.0 : 0.0, result.metrics.setupTime, result.metrics.solveTime};
+    double global[3];
+    Teuchos::reduceAll<int, double>(*comm, Teuchos::REDUCE_MAX, 3, local, global);
+    result.metrics.setupTime = global[1];
+    result.metrics.solveTime = global[2];
+
+    result.metrics.totalTime = 0.0;
+    if (spec_.evaluation.measure_setup) {
+      result.metrics.totalTime += result.metrics.setupTime;
+    }
+    if (spec_.evaluation.measure_solve) {
+      result.metrics.totalTime += result.metrics.solveTime;
+    }
+
+    if (global[0] > 0.0) {
+      result.objective = spec_.failure_penalty;
+      result.status = "failed";
+      result.metrics.converged = false;
+      if (result.message.empty()) {
+        result.message = "MueLu GPTune candidate evaluation failed on another rank";
+      }
+    } else if (!result.metrics.converged && spec_.evaluation.fail_on_nonconvergence) {
+      result.objective = spec_.failure_penalty;
+      result.status = "failed";
+    } else {
+      result.objective = ObjectiveFromMetrics(spec_, result.metrics);
+      result.status = "success";
     }
 
     const bool retainedAsBest = result.status == "success" &&

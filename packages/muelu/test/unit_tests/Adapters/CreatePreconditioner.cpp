@@ -493,7 +493,7 @@ TEUCHOS_UNIT_TEST_TEMPLATE_4_DECL(PetraOperator, StartupTuning_GPTuneTuneOnlyRes
   TEST_ASSERT(result.hasRetainedHierarchy);
   TEST_ASSERT(!result.bestHierarchy.is_null());
   TEST_EQUALITY(Teuchos::any_cast<int>(result.bestCandidate.at("max levels")), 2);
-  TEST_EQUALITY(result.bestParameterList.get<int>("max levels"), 2);
+  TEST_EQUALITY(result.bestParameterList.template get<int>("max levels"), 2);
 }
 
 #ifdef HAVE_MUELU_BELOS
