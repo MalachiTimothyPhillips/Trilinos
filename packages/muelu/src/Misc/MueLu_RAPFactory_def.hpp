@@ -18,6 +18,9 @@
 
 #include "MueLu_RAPFactory_decl.hpp"
 
+#include <Xpetra_BlockedCrsMatrix.hpp>
+#include <Xpetra_MatrixMatrix.hpp>
+
 #include "MueLu_Utilities.hpp"
 #include "MueLu_MasterList.hpp"
 #include "MueLu_Monitor.hpp"
@@ -119,7 +122,74 @@ void RAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Build(Level& fineLev
     RAPparams->set("compute global constants", computeGlobalConstantsForAc);
     if (!useImplicit)
       R = Get<RCP<Matrix> >(coarseLevel, "R");
-    Utilities::TripleMatrixProduct(R, A, P, Ac, pL, *this, APparams, RAPparams, &coarseLevel);
+
+    // Blocked A with a block-diagonal P whose diagonal coarse blocks are already on the coarse level as
+    // "Operatorsubblock<i>" (MueLu::MultiPhys puts the subblock hierarchies' level operators there): those blocks
+    // are P_i^T A_ii P_i, so take them and compute only the coupling blocks P_i^T A_ij P_j (or R_i A_ij P_j).
+    // Returns null, and the general triple product runs, unless all of that holds with matching maps.
+    auto blockedAcReusingDiagonal = [&]() -> RCP<Matrix> {
+      using BlockedCrs = Xpetra::BlockedCrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>;
+      auto bA          = rcp_dynamic_cast<BlockedCrs>(A);
+      auto bP          = rcp_dynamic_cast<BlockedCrs>(P);
+      auto bR          = rcp_dynamic_cast<BlockedCrs>(R);
+      if (bA.is_null() || bP.is_null() || (!useImplicit && bR.is_null())) return Teuchos::null;
+      const size_t n = bA->Rows();
+      if (bA->Cols() != n || bP->Rows() != n || bP->Cols() != n) return Teuchos::null;
+      auto plainBlock = [](const RCP<Matrix>& M) { return M.is_null() || rcp_dynamic_cast<BlockedCrs>(M).is_null(); };
+      // getGlobalNumEntries() needs the graph's global constants, which matrix-matrix products do not compute.
+      auto withGlobalConstants = [](const RCP<Matrix>& M) {
+        if (!M.is_null() && !M->haveGlobalConstants())
+          Teuchos::rcp_const_cast<CrsGraph>(M->getCrsGraph())->computeGlobalConstants();
+        return M;
+      };
+      for (size_t i = 0; i < n; ++i)
+        for (size_t j = 0; j < n; ++j)
+          if (plainBlock(bA->getMatrix(i, j)) && plainBlock(bP->getMatrix(i, j))) {
+            withGlobalConstants(bA->getMatrix(i, j));
+            withGlobalConstants(bP->getMatrix(i, j));
+          }
+      std::vector<RCP<Matrix>> diag(n);
+      for (size_t i = 0; i < n; ++i) {
+        for (size_t j = 0; j < n; ++j) {
+          if (!plainBlock(bA->getMatrix(i, j)) || !plainBlock(bP->getMatrix(i, j))) return Teuchos::null;
+          if (i != j && !bP->getMatrix(i, j).is_null() && bP->getMatrix(i, j)->getGlobalNumEntries() > 0) return Teuchos::null;
+        }
+        const std::string name = "Operatorsubblock" + Teuchos::toString(i);
+        auto Pii               = bP->getMatrix(i, i);
+        if (Pii.is_null() || !coarseLevel.IsAvailable(name, NoFactory::get())) return Teuchos::null;
+        diag[i] = rcp_dynamic_cast<Matrix>(coarseLevel.Get<RCP<Operator> >(name, NoFactory::get()));
+        if (diag[i].is_null() || !plainBlock(diag[i]) || !diag[i]->getRangeMap()->isSameAs(*Pii->getDomainMap()) ||
+            !diag[i]->getDomainMap()->isSameAs(*Pii->getDomainMap()))
+          return Teuchos::null;
+      }
+
+      SubFactoryMonitor m2(*this, "MxM: coupling blocks only (diagonal blocks from subblocks)", coarseLevel);
+      // The MapExtractor constructor takes non-const references, so pass named copies.
+      RCP<const Xpetra::MapExtractor<Scalar, LocalOrdinal, GlobalOrdinal, Node> > rangeExtractor  = bP->getDomainMapExtractor();
+      RCP<const Xpetra::MapExtractor<Scalar, LocalOrdinal, GlobalOrdinal, Node> > domainExtractor = bP->getDomainMapExtractor();
+      auto bAc = rcp(new BlockedCrs(rangeExtractor, domainExtractor, 33));
+      for (size_t i = 0; i < n; ++i) {
+        for (size_t j = 0; j < n; ++j) {
+          if (i == j) {
+            bAc->setMatrix(i, i, diag[i]);
+            continue;
+          }
+          auto Aij = bA->getMatrix(i, j);
+          if (Aij.is_null() || Aij->getGlobalNumEntries() == 0) continue;  // structurally zero coupling
+          RCP<Matrix> APj   = MatrixMatrix::Multiply(*Aij, false, *bP->getMatrix(j, j), false, GetOStream(Statistics2));
+          RCP<Matrix> RAPij = useImplicit ? MatrixMatrix::Multiply(*bP->getMatrix(i, i), true, *APj, false, GetOStream(Statistics2))
+                                          : MatrixMatrix::Multiply(*bR->getMatrix(i, i), false, *APj, false, GetOStream(Statistics2));
+          bAc->setMatrix(i, j, withGlobalConstants(RAPij));
+        }
+      }
+      bAc->fillComplete();
+      return bAc;
+    };
+
+    Ac                             = blockedAcReusingDiagonal();
+    const bool reusedDiagonalBlocks = !Ac.is_null();
+    if (!reusedDiagonalBlocks)
+      Utilities::TripleMatrixProduct(R, A, P, Ac, pL, *this, APparams, RAPparams, &coarseLevel);
 
     if (!Ac.is_null()) {
       std::ostringstream oss;
@@ -127,7 +197,7 @@ void RAPFactory<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Build(Level& fineLev
       Ac->setObjectLabel(oss.str());
     }
     Set(coarseLevel, "A", Ac);
-    if (!isGPU) {
+    if (!isGPU && !reusedDiagonalBlocks) {
       if (!pL.get<bool>("rap: triple product")) {
         TEUCHOS_TEST_FOR_EXCEPTION(!APparams->isParameter("graph"), std::runtime_error, "\"AP reuse data\" does not contain the expected reuse data.");
         Set(coarseLevel, "AP reuse data", APparams);
