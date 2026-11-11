@@ -34,6 +34,15 @@
 #include "Xpetra_Matrix.hpp"
 #include "Xpetra_MatrixFactory.hpp"
 #include "Xpetra_CrsMatrixWrap.hpp"
+#include "Xpetra_TpetraCrsMatrix.hpp"
+#include "Xpetra_TpetraMap.hpp"
+
+#include <Teuchos_CommHelpers.hpp>
+#include <Tpetra_CrsMatrix.hpp>
+#include <Tpetra_Details_makeColMap.hpp>
+#include <KokkosSparse_SortCrs.hpp>
+#include <cstdlib>
+#include <string>
 
 #ifdef HAVE_XPETRA_THYRA
 #include <Thyra_ProductVectorSpaceBase.hpp>
@@ -710,6 +719,53 @@ void BlockedCrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::apply(const Mu
                                                                         const Teuchos::ArrayRCP<LocalOrdinal>& regionInterfaceLIDs) const {}
 
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
+bool BlockedCrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::applyBlockedInPlace(const MultiVector& X, MultiVector& Y,
+                                                                                      Teuchos::ETransp mode,
+                                                                                      Scalar alpha,
+                                                                                      Scalar beta) const {
+  auto bX = dynamic_cast<const BlockedMultiVector*>(&X);
+  auto bY = dynamic_cast<BlockedMultiVector*>(&Y);
+  if (bX == nullptr || bY == nullptr || static_cast<const MultiVector*>(bX) == static_cast<const MultiVector*>(bY))
+    return false;
+
+  // In NO_TRANS, X lives on the domain blocks and Y on the range blocks; TRANS swaps them.
+  const bool noTrans          = mode == Teuchos::NO_TRANS;
+  const size_t numXBlocks     = noTrans ? Cols() : Rows();
+  const size_t numYBlocks     = noTrans ? Rows() : Cols();
+  const bool xThyraMode       = noTrans ? bDomainThyraMode_ : bRangeThyraMode_;
+  const bool yThyraMode       = noTrans ? bRangeThyraMode_ : bDomainThyraMode_;
+  if (bX->getBlockedMap()->getNumMaps() != numXBlocks || bY->getBlockedMap()->getNumMaps() != numYBlocks ||
+      bX->getBlockedMap()->getThyraMode() != xThyraMode || bY->getBlockedMap()->getThyraMode() != yThyraMode)
+    return false;
+  for (size_t r = 0; r < Rows(); ++r)
+    for (size_t c = 0; c < Cols(); ++c)
+      if (!getMatrix(r, c).is_null() && !Teuchos::rcp_dynamic_cast<const BlockedCrsMatrix>(getMatrix(r, c)).is_null())
+        return false;
+
+  const SC zero = ScalarTraits<SC>::zero();
+  const SC one  = ScalarTraits<SC>::one();
+  for (size_t i = 0; i < numYBlocks; ++i) {
+    RCP<MultiVector> Yi = bY->getMultiVector(i, yThyraMode);
+    bool contributed    = false;  // the first contribution scales the old Y_i by beta, the rest accumulate
+    for (size_t j = 0; j < numXBlocks; ++j) {
+      RCP<Matrix> Aij = noTrans ? getMatrix(i, j) : getMatrix(j, i);
+      // getGlobalNumEntries() is stored after fillComplete, so every rank skips the same blocks.
+      if (Aij.is_null() || Aij->getGlobalNumEntries() == 0)
+        continue;
+      Aij->apply(*bX->getMultiVector(j, xThyraMode), *Yi, mode, alpha, contributed ? one : beta);
+      contributed = true;
+    }
+    if (!contributed) {  // no block with entries in this row: Y_i = beta * Y_i
+      if (beta == zero)
+        Yi->putScalar(zero);
+      else if (beta != one)
+        Yi->scale(beta);
+    }
+  }
+  return true;
+}
+
+template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
 void BlockedCrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::apply(const MultiVector& X, MultiVector& Y,
                                                                         Teuchos::ETransp mode,
                                                                         Scalar alpha,
@@ -728,6 +784,11 @@ void BlockedCrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::apply(const Mu
 
   // TODO get rid of me: adapt MapExtractor
   bool bBlockedX = (refbX != Teuchos::null) ? true : false;
+
+  // Fast path for blocked X and Y laid out like this matrix: apply each block straight into the matching block of
+  // Y, accumulating in place, and skip blocks without entries. No temporaries, and no Import for empty blocks.
+  if (applyBlockedInPlace(X, Y, mode, alpha, beta))
+    return;
 
   // create (temporary) vectors for output
   // In the end we call Y.update(alpha, *tmpY, beta). Therefore we need a new vector storing the temporary results
@@ -1124,6 +1185,198 @@ void BlockedCrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::setMatrix(size
   blocks_[r * Cols() + c] = mat;
 }
 
+namespace Details {
+//! XPETRA_BLOCKED_MERGE_LOCAL=0 makes BlockedCrsMatrix::Merge use only the general row-by-row merge.
+inline bool mergeLocalDisabled() {
+  static const bool disabled = [] {
+    const char* v = std::getenv("XPETRA_BLOCKED_MERGE_LOCAL");
+    return v != nullptr && std::string(v) == "0";
+  }();
+  return disabled;
+}
+
+template <class OffsetView, class LO>
+KOKKOS_INLINE_FUNCTION LO mergeLocalBlockRow(const OffsetView& rowOffset, const LO row) {
+  LO r = 0;
+  while (row >= rowOffset(r + 1)) ++r;
+  return r;
+}
+
+/// Kokkos part of BlockedCrsMatrix::MergeLocal. blocks[r * nBCols + c] is block (r,c) or null; merged local row
+/// rowOffset[r] + i is local row i of block row r; block column c's column GIDs plus colShift[c] are merged GIDs.
+template <class SC, class LO, class GO, class NO>
+Teuchos::RCP<Tpetra::CrsMatrix<SC, LO, GO, NO>> mergeLocalBlocks(
+    const std::vector<Teuchos::RCP<const Tpetra::CrsMatrix<SC, LO, GO, NO>>>& blocks, const LO nBRows, const LO nBCols,
+    const std::vector<LO>& rowOffsetHost, const std::vector<GO>& colShiftHost,
+    const Teuchos::RCP<const Tpetra::Map<LO, GO, NO>>& domainMap, const Teuchos::RCP<const Tpetra::Map<LO, GO, NO>>& rangeMap) {
+  using crs_type          = Tpetra::CrsMatrix<SC, LO, GO, NO>;
+  using lcl_matrix_type   = typename crs_type::local_matrix_device_type;
+  using lcl_map_type      = typename Tpetra::Map<LO, GO, NO>::local_map_type;
+  using row_map_type      = typename lcl_matrix_type::row_map_type::non_const_type;
+  using index_type        = typename lcl_matrix_type::index_type::non_const_type;
+  using values_type       = typename lcl_matrix_type::values_type::non_const_type;
+  using execution_space   = typename lcl_matrix_type::execution_space;
+  using memory_space      = typename NO::memory_space;
+  using offset_type       = typename row_map_type::non_const_value_type;
+  using policy_type       = Kokkos::RangePolicy<execution_space, LO>;
+
+  // Block descriptions, readable on the device.
+  Kokkos::View<lcl_matrix_type**, Kokkos::SharedSpace> lclBlocks(
+      Kokkos::view_alloc("MergeLocal::blocks", Kokkos::SequentialHostInit), nBRows, nBCols);
+  Kokkos::View<lcl_map_type**, Kokkos::SharedSpace> lclColMaps(
+      Kokkos::view_alloc("MergeLocal::colMaps", Kokkos::SequentialHostInit), nBRows, nBCols);
+  Kokkos::View<int**, memory_space> hasBlock("MergeLocal::hasBlock", nBRows, nBCols);
+  Kokkos::View<LO*, memory_space> rowOffset("MergeLocal::rowOffset", nBRows + 1);
+  Kokkos::View<GO*, memory_space> colShift("MergeLocal::colShift", nBCols);
+  {
+    auto hasBlockHost  = Kokkos::create_mirror_view(hasBlock);
+    auto rowOffsetHostV = Kokkos::create_mirror_view(rowOffset);
+    auto colShiftHostV  = Kokkos::create_mirror_view(colShift);
+    for (LO r = 0; r < nBRows; ++r) {
+      for (LO c = 0; c < nBCols; ++c) {
+        const auto& blk    = blocks[r * nBCols + c];
+        hasBlockHost(r, c) = blk.is_null() ? 0 : 1;
+        if (!blk.is_null()) {
+          lclBlocks(r, c)  = blk->getLocalMatrixDevice();
+          lclColMaps(r, c) = blk->getColMap()->getLocalMap();
+        }
+      }
+    }
+    for (LO r = 0; r <= nBRows; ++r) rowOffsetHostV(r) = rowOffsetHost[r];
+    for (LO c = 0; c < nBCols; ++c) colShiftHostV(c) = colShiftHost[c];
+    Kokkos::deep_copy(hasBlock, hasBlockHost);
+    Kokkos::deep_copy(rowOffset, rowOffsetHostV);
+    Kokkos::deep_copy(colShift, colShiftHostV);
+  }
+  const LO numRows = rowOffsetHost[nBRows];
+
+  // Row lengths, then their prefix sum.
+  row_map_type rowPtr("MergeLocal::rowPtr", numRows + 1);
+  Kokkos::parallel_for(
+      "MergeLocal::count", policy_type(0, numRows), KOKKOS_LAMBDA(const LO row) {
+        const LO r   = mergeLocalBlockRow(rowOffset, row);
+        const LO lid = row - rowOffset(r);
+        offset_type n = 0;
+        for (LO c = 0; c < nBCols; ++c)
+          if (hasBlock(r, c)) n += lclBlocks(r, c).graph.row_map(lid + 1) - lclBlocks(r, c).graph.row_map(lid);
+        rowPtr(row + 1) = n;
+      });
+  offset_type nnz = 0;
+  Kokkos::parallel_scan(
+      "MergeLocal::scan", policy_type(0, numRows + 1), KOKKOS_LAMBDA(const LO i, offset_type& sum, const bool final) {
+        sum += rowPtr(i);
+        if (final) rowPtr(i) = sum;
+      },
+      nnz);
+
+  // Global column indices (merged numbering) and values.
+  Kokkos::View<GO*, memory_space> gblCols(Kokkos::ViewAllocateWithoutInitializing("MergeLocal::gblCols"), nnz);
+  values_type values(Kokkos::ViewAllocateWithoutInitializing("MergeLocal::values"), nnz);
+  Kokkos::parallel_for(
+      "MergeLocal::fill", policy_type(0, numRows), KOKKOS_LAMBDA(const LO row) {
+        const LO r      = mergeLocalBlockRow(rowOffset, row);
+        const LO lid    = row - rowOffset(r);
+        offset_type pos = rowPtr(row);
+        for (LO c = 0; c < nBCols; ++c) {
+          if (!hasBlock(r, c)) continue;
+          const auto& A = lclBlocks(r, c);
+          for (auto k = A.graph.row_map(lid); k < A.graph.row_map(lid + 1); ++k, ++pos) {
+            gblCols(pos) = lclColMaps(r, c).getGlobalElement(A.graph.entries(k)) + colShift(c);
+            values(pos)  = A.values(k);
+          }
+        }
+      });
+
+  Teuchos::RCP<const Tpetra::Map<LO, GO, NO>> colMap;
+  Tpetra::Details::makeColMap<LO, GO, NO>(colMap, domainMap, gblCols);
+  TEUCHOS_TEST_FOR_EXCEPTION(colMap.is_null(), Xpetra::Exceptions::RuntimeError, "BlockedCrsMatrix::MergeLocal: makeColMap failed.");
+
+  index_type lclCols(Kokkos::ViewAllocateWithoutInitializing("MergeLocal::lclCols"), nnz);
+  const auto lclColMap = colMap->getLocalMap();
+  Kokkos::parallel_for(
+      "MergeLocal::localize", Kokkos::RangePolicy<execution_space, offset_type>(0, nnz),
+      KOKKOS_LAMBDA(const offset_type k) { lclCols(k) = lclColMap.getLocalElement(gblCols(k)); });
+  KokkosSparse::sort_crs_matrix<execution_space, row_map_type, index_type, values_type>(rowPtr, lclCols, values);
+
+  lcl_matrix_type lclMerged("MergeLocal::matrix", numRows, static_cast<LO>(colMap->getLocalNumElements()), nnz, values, rowPtr, lclCols);
+  return Teuchos::rcp(new crs_type(lclMerged, rangeMap, colMap, domainMap, rangeMap));
+}
+}  // namespace Details
+
+template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
+Teuchos::RCP<Xpetra::Matrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>> BlockedCrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::MergeLocal() const {
+  XPETRA_MONITOR("XpetraBlockedCrsMatrix::MergeLocal");
+  using Teuchos::RCP;
+  using Teuchos::rcp_dynamic_cast;
+  using tpetra_crs_type     = Tpetra::CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>;
+  const LocalOrdinal nBRows = static_cast<LocalOrdinal>(Rows());
+  const LocalOrdinal nBCols = static_cast<LocalOrdinal>(Cols());
+  const auto comm           = getFullRangeMap()->getComm();
+
+  // Every rank must agree on taking this path; each check below only clears `ok`.
+  int ok = 1;
+  std::vector<RCP<const tpetra_crs_type>> blocks(nBRows * nBCols);
+  for (LocalOrdinal r = 0; r < nBRows && ok; ++r) {
+    for (LocalOrdinal c = 0; c < nBCols && ok; ++c) {
+      RCP<const Matrix> mat = getMatrix(r, c);
+      if (mat.is_null()) continue;
+      auto wrap = rcp_dynamic_cast<const CrsMatrixWrap>(mat);
+      if (wrap.is_null()) {  // nested blocked operator or something else
+        ok = 0;
+        break;
+      }
+      auto tmat = rcp_dynamic_cast<const Xpetra::TpetraCrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>>(wrap->getCrsMatrix());
+      if (tmat.is_null()) {
+        ok = 0;
+        break;
+      }
+      blocks[r * nBCols + c] = tmat->getTpetra_CrsMatrix();
+    }
+  }
+
+  // Merged local rows are the block rows in block order: the local layout BlockedMap gives the full range Map.
+  // Block columns move from block numbering to merged (Xpetra) numbering by a constant shift per block column.
+  // Check both on every local entry; together the ranks cover every GID because the maps are one-to-one.
+  std::vector<LocalOrdinal> rowOffsetHost(nBRows + 1, 0);
+  std::vector<GlobalOrdinal> colShiftHost(nBCols, 0);
+  if (ok) {
+    auto fullRange = getFullRangeMap();
+    for (LocalOrdinal r = 0; r < nBRows && ok; ++r) {
+      auto xRowMap            = getRangeMapExtractor()->getMap(r, false);
+      auto bRowMap            = getRangeMapExtractor()->getMap(r, bRangeThyraMode_);
+      const LocalOrdinal nLoc = static_cast<LocalOrdinal>(xRowMap->getLocalNumElements());
+      rowOffsetHost[r + 1]    = rowOffsetHost[r] + nLoc;
+      for (LocalOrdinal c = 0; c < nBCols && ok; ++c) {
+        const auto& blk = blocks[r * nBCols + c];
+        if (!blk.is_null() && !blk->getRowMap()->isSameAs(*toTpetra(bRowMap))) ok = 0;
+      }
+      for (LocalOrdinal i = 0; i < nLoc && ok; ++i)
+        if (fullRange->getGlobalElement(rowOffsetHost[r] + i) != xRowMap->getGlobalElement(i)) ok = 0;
+    }
+    if (ok && static_cast<size_t>(rowOffsetHost[nBRows]) != fullRange->getLocalNumElements()) ok = 0;
+    for (LocalOrdinal c = 0; c < nBCols && ok; ++c) {
+      auto xDomMap    = getDomainMapExtractor()->getMap(c, false);
+      auto bDomMap    = getDomainMapExtractor()->getMap(c, bDomainThyraMode_);
+      colShiftHost[c] = xDomMap->getMinAllGlobalIndex() - bDomMap->getMinAllGlobalIndex();
+      if (xDomMap->getLocalNumElements() != bDomMap->getLocalNumElements()) ok = 0;
+      for (size_t i = 0; i < xDomMap->getLocalNumElements() && ok; ++i)
+        if (xDomMap->getGlobalElement(i) != bDomMap->getGlobalElement(i) + colShiftHost[c]) ok = 0;
+    }
+  }
+  int allOk = 0;
+  Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, ok, Teuchos::outArg(allOk));
+  if (!allOk) return Teuchos::null;
+
+  auto merged = Details::mergeLocalBlocks<Scalar, LocalOrdinal, GlobalOrdinal, Node>(
+      blocks, nBRows, nBCols, rowOffsetHost, colShiftHost, toTpetra(getFullDomainMap()), toTpetra(getFullRangeMap()));
+  RCP<CrsMatrix> mergedCrs = Teuchos::rcp(new Xpetra::TpetraCrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>(merged));
+  RCP<Matrix> sparse       = Teuchos::rcp(new CrsMatrixWrap(mergedCrs));
+
+  TEUCHOS_TEST_FOR_EXCEPTION(sparse->getGlobalNumEntries() != getGlobalNumEntries(), Xpetra::Exceptions::RuntimeError,
+                             "BlockedCrsMatrix::MergeLocal: Global number of entries of merged matrix does not coincide with global number of entries of blocked operator.");
+  return sparse;
+}
+
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
 Teuchos::RCP<Xpetra::Matrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>> BlockedCrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::Merge() const {
   XPETRA_MONITOR("XpetraBlockedCrsMatrix::Merge");
@@ -1136,6 +1389,12 @@ Teuchos::RCP<Xpetra::Matrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>> BlockedC
 
   TEUCHOS_TEST_FOR_EXCEPTION(isFillComplete() == false, Xpetra::Exceptions::RuntimeError,
                              "BlockedCrsMatrix::Merge: BlockMatrix must be fill-completed.");
+
+  // Local (Kokkos) merge when the block layout allows it; otherwise the general row-by-row merge below.
+  if (!Details::mergeLocalDisabled()) {
+    RCP<Matrix> merged = MergeLocal();
+    if (!merged.is_null()) return merged;
+  }
 
   LocalOrdinal lclNumRows = getFullRangeMap()->getLocalNumElements();
   Teuchos::ArrayRCP<size_t> numEntPerRow(lclNumRows);

@@ -567,6 +567,17 @@ class BlockedCrsMatrix : public Matrix<Scalar, LocalOrdinal, GlobalOrdinal, Node
    */
   void Add(const Matrix& A, const Scalar scalarA, Matrix& B, const Scalar scalarB) const;
 
+  /// Y = alpha * op(this) * X + beta * Y block by block, writing straight into the blocks of Y and skipping blocks
+  /// without entries. Returns false (and does nothing) unless X and Y are distinct BlockedMultiVectors laid out like
+  /// this matrix and no block is itself a BlockedCrsMatrix; apply() then uses its general path.
+  bool applyBlockedInPlace(const MultiVector& X, MultiVector& Y, Teuchos::ETransp mode, Scalar alpha, Scalar beta) const;
+
+  /// Merge() without per-row global inserts: builds the merged local matrix with Kokkos kernels from the blocks'
+  /// local matrices, then the column Map. Returns null (on every rank) unless all blocks are Tpetra CrsMatrices,
+  /// each rank's merged rows are its block rows in block order, and every block column's GIDs map to the merged
+  /// numbering by a constant shift; Merge() then uses its general path.
+  Teuchos::RCP<Matrix> MergeLocal() const;
+
   //@}
 
   // Default view is created after fillComplete()
