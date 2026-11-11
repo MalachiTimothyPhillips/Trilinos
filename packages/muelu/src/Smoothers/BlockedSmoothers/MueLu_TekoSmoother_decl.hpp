@@ -22,6 +22,11 @@
 #include <Teuchos_ParameterList.hpp>
 
 #include <Xpetra_MapExtractor_fwd.hpp>
+#include <Xpetra_BlockedMap.hpp>
+#include <Xpetra_BlockedMultiVector.hpp>
+#include <Xpetra_ThyraUtils.hpp>
+#include <Thyra_MultiVectorStdOps.hpp>
+#include <Thyra_DefaultBlockedLinearOp.hpp>
 
 #include "MueLu_TekoSmoother_fwd.hpp"
 #include "MueLu_SmootherPrototype.hpp"
@@ -228,9 +233,20 @@ class TekoSmoother<double, int, GlobalOrdinal, Node> : public SmootherPrototype<
     TEUCHOS_TEST_FOR_EXCEPTION(bThyOp_.is_null(), Exceptions::BadCast,
                                "MueLu::TekoSmoother::Build: Could not extract thyra operator from BlockedCrsMatrix.");
 
-    Teuchos::RCP<const Thyra::LinearOpBase<Scalar>> thyOp = Teuchos::rcp_dynamic_cast<const Thyra::LinearOpBase<Scalar>>(bThyOp_);
-    TEUCHOS_TEST_FOR_EXCEPTION(thyOp.is_null(), Exceptions::BadCast,
-                               "MueLu::TekoSmoother::Build: Downcast of Thyra::BlockedLinearOpBase to Teko::LinearOp failed.");
+    // Hand Teko the blocked operator without the blocks that have no entries, so its block sweeps do not apply
+    // (and communicate for) structurally zero couplings.
+    auto prunedThyOp = Thyra::defaultBlockedLinearOp<Scalar>();
+    prunedThyOp->beginBlockFill(bThyOp_->productRange(), bThyOp_->productDomain());
+    for (size_t r = 0; r < bA_->Rows(); ++r) {
+      for (size_t c = 0; c < bA_->Cols(); ++c) {
+        auto Arc = bA_->getMatrix(r, c);
+        if (bThyOp_->blockExists(r, c) && !Arc.is_null() && Arc->getGlobalNumEntries() > 0)
+          prunedThyOp->setBlock(r, c, bThyOp_->getBlock(r, c));
+      }
+    }
+    prunedThyOp->endBlockFill();
+
+    Teuchos::RCP<const Thyra::LinearOpBase<Scalar>> thyOp = prunedThyOp;
 
     // parameter list contains TekoSmoother parameters but does not handle the Teko parameters itself!
     const ParameterList &pL  = Factory::GetParameterList();
@@ -248,6 +264,16 @@ class TekoSmoother<double, int, GlobalOrdinal, Node> : public SmootherPrototype<
     inverseOp_ = Teko::buildInverse(*inverse, thyOp);
     TEUCHOS_TEST_FOR_EXCEPTION(inverseOp_.is_null(), Exceptions::BadCast,
                                "MueLu::TekoSmoother::Build: Failed to build Teko inverse operator. Probably a problem with the Teko parameters.");
+
+    // Converting the product domain space to an Xpetra::BlockedMap builds one Map per block, the full Map, and one
+    // Import per block, all collective. Do it once here rather than in every Apply.
+    auto domainMap = Xpetra::ThyraUtils<Scalar, LocalOrdinal, GlobalOrdinal, Node>::toXpetra(
+        Teuchos::rcp_dynamic_cast<const Thyra::VectorSpaceBase<Scalar>>(bThyOp_->productDomain()), A_->getRowMap()->getComm());
+    domainBlockedMap_ = Teuchos::rcp_dynamic_cast<const BlockedMap>(domainMap);
+    TEUCHOS_TEST_FOR_EXCEPTION(domainBlockedMap_.is_null(), Exceptions::BadCast,
+                               "MueLu::TekoSmoother::Build: Product domain space did not convert to an Xpetra::BlockedMap.");
+    thyB_ = Teuchos::null;
+    thyX_ = Teuchos::null;
 
     this->IsSetup(true);
   }
@@ -268,43 +294,57 @@ class TekoSmoother<double, int, GlobalOrdinal, Node> : public SmootherPrototype<
 
     using STS = Teuchos::ScalarTraits<Scalar>;
 
-    auto createProductMultiVector = [](const Teuchos::RCP<const Thyra::VectorSpaceBase<Scalar>> &space,
-                                       int numVecs,
-                                       const char *castErrorMsg) {
-      auto mv     = Thyra::createMembers(space, numVecs);
-      auto prodMv = Teuchos::rcp_dynamic_cast<Thyra::ProductMultiVectorBase<Scalar>>(mv);
-      TEUCHOS_TEST_FOR_EXCEPTION(prodMv.is_null(), Exceptions::BadCast, castErrorMsg);
-      return std::make_pair(mv, prodMv);
+    // Work vectors are kept between applies; allocate (or reallocate) them only when the vector count changes.
+    auto productMultiVector = [](Teuchos::RCP<Thyra::ProductMultiVectorBase<Scalar>> &cached,
+                                 const Teuchos::RCP<const Thyra::VectorSpaceBase<Scalar>> &space,
+                                 int numVecs,
+                                 const char *castErrorMsg) {
+      if (cached.is_null() || cached->domain()->dim() != numVecs) {
+        cached = Teuchos::rcp_dynamic_cast<Thyra::ProductMultiVectorBase<Scalar>>(Thyra::createMembers(space, numVecs));
+        TEUCHOS_TEST_FOR_EXCEPTION(cached.is_null(), Exceptions::BadCast, castErrorMsg);
+      }
+      return cached;
     };
 
     auto solveWithThyra = [&](const Teuchos::RCP<const Xpetra::MultiVector<Scalar, LocalOrdinal, GlobalOrdinal, Node>> &rhs,
                               bool initializeFromX,
                               const typename STS::magnitudeType alphaX) {
-      auto [thyB, thyProdB] = createProductMultiVector(
-          Teuchos::rcp_dynamic_cast<const Thyra::VectorSpaceBase<Scalar>>(bThyOp_->productRange()),
+      auto thyProdB = productMultiVector(
+          thyB_, Teuchos::rcp_dynamic_cast<const Thyra::VectorSpaceBase<Scalar>>(bThyOp_->productRange()),
           Teuchos::as<int>(rhs->getNumVectors()),
           "MueLu::TekoSmoother::Apply: Failed to cast range space to product range space.");
 
       Xpetra::ThyraUtils<Scalar, LocalOrdinal, GlobalOrdinal, Node>::updateThyra(rhs, rgMapExtractor, thyProdB);
 
-      auto [thyX, thyProdX] = createProductMultiVector(
-          Teuchos::rcp_dynamic_cast<const Thyra::VectorSpaceBase<Scalar>>(bThyOp_->productDomain()),
+      auto thyProdX = productMultiVector(
+          thyX_, Teuchos::rcp_dynamic_cast<const Thyra::VectorSpaceBase<Scalar>>(bThyOp_->productDomain()),
           Teuchos::as<int>(X.getNumVectors()),
           "MueLu::TekoSmoother::Apply: Failed to cast domain space to product domain space.");
 
       if (initializeFromX) {
         Xpetra::ThyraUtils<Scalar, LocalOrdinal, GlobalOrdinal, Node>::updateThyra(Teuchos::rcpFromRef(X), rgMapExtractor, thyProdX);
+      } else {
+        // A freshly created work vector is zero; keep that for the reused one.
+        thyProdX->assign(STS::zero());
       }
 
       inverseOp_->apply(
           Thyra::NOTRANS,
-          *thyB,
-          thyX.ptr(),
+          *thyProdB,
+          thyProdX.ptr(),
           STS::one(),
           STS::zero());
 
-      auto XX = Xpetra::ThyraUtils<Scalar, LocalOrdinal, GlobalOrdinal, Node>::toXpetra(thyX, comm);
-      X.update(STS::one(), *XX, alphaX);
+      // Same result as ThyraUtils::toXpetra(thyX, comm), but on the BlockedMap built in Setup: each block is a
+      // shallow Xpetra view of the Thyra block, so no Maps, Imports, or vectors are created here.
+      const int numBlocks = thyProdX->productSpace()->numBlocks();
+      std::vector<RCP<MultiVector>> xBlocks(numBlocks);
+      for (int b = 0; b < numBlocks; ++b) {
+        xBlocks[b] = Xpetra::ThyraUtils<Scalar, LocalOrdinal, GlobalOrdinal, Node>::toXpetra(
+            thyProdX->getNonconstMultiVectorBlock(b), comm);
+      }
+      BlockedMultiVector XX(domainBlockedMap_, xBlocks);
+      X.update(STS::one(), XX, alphaX);
     };
 
     if (InitialGuessIsZero) {
@@ -363,7 +403,14 @@ class TekoSmoother<double, int, GlobalOrdinal, Node> : public SmootherPrototype<
   RCP<ParameterList> tekoParams_;  // < ! parameter list containing Teko parameters. These parameters are not administrated by the factory and not validated.
 
   Teko::LinearOp inverseOp_;  // < ! Teko inverse operator
-};                            // class TekoSmoother (specialization on SC=double)
+
+  //! Xpetra map of the product domain space, built once in Setup
+  RCP<const BlockedMap> domainBlockedMap_;
+
+  //! Thyra work vectors reused by Apply
+  mutable RCP<Thyra::ProductMultiVectorBase<Scalar>> thyB_;
+  mutable RCP<Thyra::ProductMultiVectorBase<Scalar>> thyX_;
+};  // class TekoSmoother (specialization on SC=double)
 }  // namespace MueLu
 
 #define MUELU_TEKOSMOOTHER_SHORT
