@@ -28,6 +28,7 @@
 #include "MueLu_PerfUtils.hpp"
 #include "MueLu_ParameterListInterpreter.hpp"
 #include "MueLu_HierarchyManager.hpp"
+#include "MueLu_MasterList.hpp"
 #include <MueLu_HierarchyUtils.hpp>
 #include "MueLu_VerbosityLevel.hpp"
 #include <MueLu_CreateXpetraPreconditioner.hpp>
@@ -75,6 +76,12 @@ void MultiPhys<Scalar, LocalOrdinal, GlobalOrdinal, Node>::setParameters(Teuchos
     }
   }
 
+  // Handled by MultiPhys::compute, not by the ParameterListInterpreter.
+  matchLevels_ = list.get("combine: match levels", false);
+  list.remove("combine: match levels", false);
+  coordinateRepartitioning_ = list.get("combine: coordinate repartitioning", false);
+  list.remove("combine: coordinate repartitioning", false);
+
   // Are we using Kokkos?
   useKokkos_ = !Node::is_serial;
   useKokkos_ = list.get("use kokkos refactor", useKokkos_);
@@ -105,6 +112,19 @@ void MultiPhys<Scalar, LocalOrdinal, GlobalOrdinal, Node>::compute(bool reuse) {
   ////////////////////////////////////////////////////////////////////////////////
   // Generate the (iii,iii) Hierarchy
 
+  // "combine: coordinate repartitioning": the combined levels' block smoother works through the blocks one at a time
+  // over the same ranks, and a combined row carries the coupling entries too. So each subblock's rows-per-process
+  // targets are divided by (number of blocks) x (nnz of the combined operator / nnz of its diagonal blocks).
+  double repartitionDivisor = 1.0;
+  if (coordinateRepartitioning_ && !coordinatedRepartitioningApplied_) {
+    double diagonalNnz = 0.0;
+    for (int i = 0; i < nBlks_; i++) diagonalNnz += static_cast<double>(arrayOfAuxMatrices_[i]->getGlobalNumEntries());
+    const double couplingWeight = diagonalNnz > 0.0 ? std::max(1.0, static_cast<double>(AmatMultiphysics_->getGlobalNumEntries()) / diagonalNnz) : 1.0;
+    repartitionDivisor          = nBlks_ * couplingWeight;
+    GetOStream(Runtime0) << "MultiPhys: coordinated repartitioning divides subblock rows-per-process targets by " << repartitionDivisor
+                         << " (" << nBlks_ << " blocks x coupling weight " << couplingWeight << ")" << std::endl;
+  }
+
   for (int iii = 0; iii < nBlks_; iii++) {
     if (arrayOfCoords_ != Teuchos::null) {
       if (arrayOfCoords_[iii] != Teuchos::null) {
@@ -132,10 +152,38 @@ void MultiPhys<Scalar, LocalOrdinal, GlobalOrdinal, Node>::compute(bool reuse) {
     arrayOfParamLists_[iii]->set("repartition: rebalance P and R", true);
     arrayOfParamLists_[iii]->set("repartition: explicit via new copy rebalance P and R", true);
 
+    // "combine: coordinate repartitioning" (applied once: compute() runs again on reuse).
+    if (wantToRepartition && coordinateRepartitioning_ && !coordinatedRepartitioningApplied_) {
+      auto& sub = *arrayOfParamLists_[iii];
+      sub.set("repartition: remap parts", false);
+      for (const char* name : {"repartition: target rows per proc", "repartition: min rows per proc"}) {
+        const int value = sub.isParameter(name) ? sub.get<int>(name) : MasterList::getDefault<int>(name);
+        if (value > 0) sub.set(name, std::max(1, static_cast<int>(value / repartitionDivisor)));
+      }
+    }
+
     if (paramListMultiphysics_->isParameter("repartition: use subcommunicators"))
       arrayOfParamLists_[iii]->set("repartition: use subcommunicators", paramListMultiphysics_->get<bool>("repartition: use subcommunicators"));
     else
       arrayOfParamLists_[iii]->set("repartition: use subcommunicators", true);
+
+    // Only the subblocks' prolongators and operators are used (the combined hierarchy has its own coarse solve),
+    // so skip their coarse solvers. Their smoothers stay unless omitted: their Chebyshev setup provides the
+    // lambda_max estimate that SA prolongator damping reads from the level operator.
+    arrayOfParamLists_[iii]->set("coarse: type", "none");
+    arrayOfParamLists_[iii]->remove("coarse: params", false);
+
+    // "combine: match levels" continues coarsening from a subblock's coarsest level, so keep what that needs.
+    if (matchLevels_ && paramListMultiphysics_->isParameter("combine: useMaxLevels") && paramListMultiphysics_->get<bool>("combine: useMaxLevels")) {
+      std::string keep = arrayOfParamLists_[iii]->get<std::string>("keep data", "{}");
+      keep             = keep.substr(keep.find('{') + 1, keep.rfind('}') - keep.find('{') - 1);
+      std::vector<std::string> wanted{"Nullspace"};
+      if (arrayOfCoords_ != Teuchos::null && arrayOfCoords_[iii] != Teuchos::null) wanted.push_back("Coordinates");
+      if (arrayOfMaterials_ != Teuchos::null && arrayOfMaterials_[iii] != Teuchos::null) wanted.push_back("Material");
+      for (const auto& name : wanted)
+        if (keep.find(name) == std::string::npos) keep += (keep.empty() ? "" : ",") + name;
+      arrayOfParamLists_[iii]->set("keep data", "{" + keep + "}");
+    }
   }
   // repartitioning should only happen when createing the individual P's , not
   // when combiing them
@@ -146,16 +194,69 @@ void MultiPhys<Scalar, LocalOrdinal, GlobalOrdinal, Node>::compute(bool reuse) {
   if (paramListMultiphysics_->isParameter("combine: useMaxLevels"))
     useMaxLevels = paramListMultiphysics_->get<bool>("combine: useMaxLevels");
 
+  if (coordinateRepartitioning_) coordinatedRepartitioningApplied_ = true;
+
+  const bool extendShortSubblocks = useMaxLevels && matchLevels_;
+  std::vector<RCP<HierarchyManager<SC, LO, GO, NO>>> subblockManagers(nBlks_);
+
   LO maxLevels = useMaxLevels ? 0 : std::numeric_limits<LO>::max();
   for (int i = 0; i < nBlks_; i++) {
     std::string operatorLabel = "MultiPhys (" + Teuchos::toString(i) + "," + Teuchos::toString(i) + ")";
     arrayOfAuxMatrices_[i]->setObjectLabel(operatorLabel);
-    arrayOfHierarchies_[i] = MueLu::CreateXpetraPreconditioner(arrayOfAuxMatrices_[i], *arrayOfParamLists_[i]);
+    arrayOfHierarchies_[i] = MueLu::CreateXpetraPreconditioner(arrayOfAuxMatrices_[i], *arrayOfParamLists_[i], subblockManagers[i]);
     LO tempNlevels         = arrayOfHierarchies_[i]->GetGlobalNumLevels();
     if (useMaxLevels) {
       if (tempNlevels > maxLevels) maxLevels = tempNlevels;
     } else {
       if (tempNlevels < maxLevels) maxLevels = tempNlevels;
+    }
+  }
+
+  // "combine: match levels": a subblock that stopped coarsening early continues from its coarsest level down to
+  // maxLevels. Only the missing levels are built, in a hierarchy whose fine level is that coarsest level; their P
+  // and A are spliced in below. Levels it still cannot reach (coarsening stagnates) get identity prolongators.
+  std::vector<RCP<Hierarchy>> subblockExtensions(nBlks_);
+  if (extendShortSubblocks) {
+    for (int i = 0; i < nBlks_; i++) {
+      auto H         = arrayOfHierarchies_[i];
+      const LO nLevs = H->GetGlobalNumLevels();
+      if (nLevs >= maxLevels) continue;
+
+      // With subcommunicators some ranks hold fewer levels; continuing would need the coarse communicator.
+      int haveAllLevels = H->GetNumLevels() == nLevs ? 1 : 0, allHaveAllLevels = 0;
+      Teuchos::reduceAll(*AmatMultiphysics_->getDomainMap()->getComm(), Teuchos::REDUCE_MIN, haveAllLevels, Teuchos::outArg(allHaveAllLevels));
+      if (!allHaveAllLevels) {
+        GetOStream(Warnings0) << "MultiPhys: subblock " << i << " stopped at " << nLevs << " of " << maxLevels
+                              << " levels but is not on every rank (subcommunicators); using identity prolongators below it" << std::endl;
+        continue;
+      }
+
+      auto coarsest       = H->GetLevel(nLevs - 1);
+      auto coarsestFactMg = subblockManagers[i]->GetFactoryManager(nLevs - 1);
+      Teuchos::ParameterList extensionList(*arrayOfParamLists_[i]);
+      extensionList.set("max levels", maxLevels - nLevs + 1);
+      extensionList.set("coarse: max size", 1);
+      extensionList.remove("keep data", false);
+      if (extensionList.isParameter("repartition: start level"))
+        extensionList.set("repartition: start level", std::max(0, extensionList.get<int>("repartition: start level") - (nLevs - 1)));
+      extensionList.set("hierarchy label", "MultiPhys (" + Teuchos::toString(i) + "," + Teuchos::toString(i) + ") continued");
+
+      auto& userData = extensionList.sublist("user data");
+      userData.remove("Nullspace", false);
+      userData.remove("Coordinates", false);
+      userData.remove("Material", false);
+      auto keptFactory = [&](const std::string& name) { return coarsestFactMg->GetFactory(name).get(); };
+      if (coarsest->IsAvailable("Nullspace", keptFactory("Nullspace")))
+        userData.set("Nullspace", coarsest->template Get<RCP<MultiVector>>("Nullspace", keptFactory("Nullspace")));
+      if (arrayOfCoords_ != Teuchos::null && arrayOfCoords_[i] != Teuchos::null && coarsest->IsAvailable("Coordinates", keptFactory("Coordinates")))
+        userData.set("Coordinates", coarsest->template Get<RCP<RealValuedMultiVector>>("Coordinates", keptFactory("Coordinates")));
+      if (arrayOfMaterials_ != Teuchos::null && arrayOfMaterials_[i] != Teuchos::null && coarsest->IsAvailable("Material", keptFactory("Material")))
+        userData.set("Material", coarsest->template Get<RCP<MultiVector>>("Material", keptFactory("Material")));
+
+      subblockExtensions[i]  = MueLu::CreateXpetraPreconditioner(coarsest->template Get<RCP<Matrix>>("A"), extensionList);
+      const LO reachedLevels = nLevs - 1 + subblockExtensions[i]->GetGlobalNumLevels();
+      GetOStream(Runtime0) << "MultiPhys: subblock " << i << " stopped at " << nLevs << " levels; continued coarsening to "
+                           << reachedLevels << " of " << maxLevels << " levels" << std::endl;
     }
   }
 
@@ -172,10 +273,23 @@ void MultiPhys<Scalar, LocalOrdinal, GlobalOrdinal, Node>::compute(bool reuse) {
 
     // Copy remaining levels, if needed
     if (useMaxLevels) {
-      const auto numLevelsBlk       = arrayOfHierarchies_[i]->GetNumLevels();
+      auto numLevelsBlk             = arrayOfHierarchies_[i]->GetNumLevels();
       const auto numGlobalLevelsBlk = arrayOfHierarchies_[i]->GetGlobalNumLevels();
       if (numLevelsBlk == numGlobalLevelsBlk) {
         auto crsLevel = arrayOfHierarchies_[i]->GetLevel(numLevelsBlk - 1);
+        if (!subblockExtensions[i].is_null()) {
+          // Continued levels: extension level e is Combo level (numLevelsBlk - 1 + e); its level 0 is crsLevel.
+          const auto& ext      = subblockExtensions[i];
+          const LO firstCombo = numLevelsBlk - 1;
+          for (LO e = 1; e < ext->GetNumLevels() && firstCombo + e < maxLevels; ++e) {
+            auto level = hierarchyMultiphysics_->GetLevel(firstCombo + e);
+            MueLu::HierarchyUtils<SC, LO, GO, NO>::CopyBetweenLevels(*ext->GetLevel(e), *level, "P", subblkName, "RCP<Matrix>");
+            MueLu::HierarchyUtils<SC, LO, GO, NO>::CopyBetweenLevels(*ext->GetLevel(e), *level, "A", subblkOpName, "RCP<Matrix>");
+          }
+          const LO reached = std::min<LO>(maxLevels, firstCombo + ext->GetNumLevels());
+          crsLevel         = ext->GetLevel(reached - 1 - firstCombo);
+          numLevelsBlk     = reached;
+        }
         TEUCHOS_ASSERT(crsLevel->IsAvailable("A"));
         for (int levelId = numLevelsBlk; levelId < maxLevels; ++levelId) {
           auto level = hierarchyMultiphysics_->GetLevel(levelId);

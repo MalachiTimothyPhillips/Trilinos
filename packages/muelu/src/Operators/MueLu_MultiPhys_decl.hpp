@@ -187,6 +187,17 @@ class MultiPhys : public VerboseObject, public Xpetra::Operator<Scalar, LocalOrd
 
   bool OmitSubblockSmoother_;
 
+  //! "combine: match levels": with "combine: useMaxLevels", coarsen subblocks that stop early down to the deepest
+  //! subblock's depth (only the missing levels are built) instead of carrying them with identity prolongators
+  bool matchLevels_ = false;
+
+  //! "combine: coordinate repartitioning": subblocks repartition onto the same leading ranks (no remapping), with
+  //! their rows-per-process targets divided by (number of blocks) x (combined nnz / diagonal-block nnz), since the
+  //! combined levels' block smoother works through the blocks one at a time over the same ranks and a combined row
+  //! also carries the coupling entries
+  bool coordinateRepartitioning_ = false;
+  bool coordinatedRepartitioningApplied_ = false;  // the subblock lists are scaled once, not on every compute()
+
   int nBlks_;  // number of PDE sub-systems within multiphysics system
   bool useKokkos_, enable_reuse_, syncTimers_;
 };
