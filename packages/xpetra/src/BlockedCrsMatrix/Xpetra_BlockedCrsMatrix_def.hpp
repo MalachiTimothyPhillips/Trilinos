@@ -749,8 +749,9 @@ bool BlockedCrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::applyBlockedIn
     bool contributed    = false;  // the first contribution scales the old Y_i by beta, the rest accumulate
     for (size_t j = 0; j < numXBlocks; ++j) {
       RCP<Matrix> Aij = noTrans ? getMatrix(i, j) : getMatrix(j, i);
-      // getGlobalNumEntries() is stored after fillComplete, so every rank skips the same blocks.
-      if (Aij.is_null() || Aij->getGlobalNumEntries() == 0)
+      // Skip blocks known to be empty. Global constants (and with them getGlobalNumEntries()) exist on every rank or
+      // on none, so every rank skips the same blocks; blocks without them (e.g. transposes) are applied.
+      if (Aij.is_null() || (Aij->haveGlobalConstants() && Aij->getGlobalNumEntries() == 0))
         continue;
       Aij->apply(*bX->getMultiVector(j, xThyraMode), *Yi, mode, alpha, contributed ? one : beta);
       contributed = true;

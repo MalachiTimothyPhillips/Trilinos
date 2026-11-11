@@ -240,7 +240,9 @@ class TekoSmoother<double, int, GlobalOrdinal, Node> : public SmootherPrototype<
     for (size_t r = 0; r < bA_->Rows(); ++r) {
       for (size_t c = 0; c < bA_->Cols(); ++c) {
         auto Arc = bA_->getMatrix(r, c);
-        if (bThyOp_->blockExists(r, c) && !Arc.is_null() && Arc->getGlobalNumEntries() > 0)
+        // Drop only blocks known to be empty (global constants, if present, are present on every rank).
+        const bool knownEmpty = !Arc.is_null() && Arc->haveGlobalConstants() && Arc->getGlobalNumEntries() == 0;
+        if (bThyOp_->blockExists(r, c) && !Arc.is_null() && !knownEmpty)
           prunedThyOp->setBlock(r, c, bThyOp_->getBlock(r, c));
       }
     }
