@@ -35,15 +35,18 @@ namespace MueLu {
 /*!
   @brief Helper function to create a MueLu preconditioner that can be used by Xpetra.
   @ingroup MueLuAdapters
-  Given an Xpetra::Matrix, this function returns a constructed MueLu preconditioner.
+  Given an Xpetra::Matrix, this function returns a constructed MueLu preconditioner, and in hierarchyManager the
+  HierarchyManager that built it.
   @param[in] inA Matrix
   @param[in] inParamList Parameter list
+  @param[out] hierarchyManager HierarchyManager used to set up the hierarchy
 */
 
 template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
 Teuchos::RCP<MueLu::Hierarchy<Scalar, LocalOrdinal, GlobalOrdinal, Node>>
 CreateXpetraPreconditioner(Teuchos::RCP<Xpetra::Matrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>> op,
-                           const Teuchos::ParameterList& inParamList) {
+                           const Teuchos::ParameterList& inParamList,
+                           Teuchos::RCP<MueLu::HierarchyManager<Scalar, LocalOrdinal, GlobalOrdinal, Node>>& hierarchyManager) {
   using SC = Scalar;
   using LO = LocalOrdinal;
   using GO = GlobalOrdinal;
@@ -155,7 +158,23 @@ CreateXpetraPreconditioner(Teuchos::RCP<Xpetra::Matrix<Scalar, LocalOrdinal, Glo
 
   tm->reset();
 
+  hierarchyManager = mueLuFactory;
   return H;
+}
+
+/*!
+  @brief Helper function to create a MueLu preconditioner that can be used by Xpetra.
+  @ingroup MueLuAdapters
+  As above, without returning the HierarchyManager (whose per-level factories identify data kept on the levels).
+  @param[in] inA Matrix
+  @param[in] inParamList Parameter list
+*/
+template <class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
+Teuchos::RCP<MueLu::Hierarchy<Scalar, LocalOrdinal, GlobalOrdinal, Node>>
+CreateXpetraPreconditioner(Teuchos::RCP<Xpetra::Matrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>> op,
+                           const Teuchos::ParameterList& inParamList) {
+  Teuchos::RCP<MueLu::HierarchyManager<Scalar, LocalOrdinal, GlobalOrdinal, Node>> hierarchyManager;
+  return CreateXpetraPreconditioner(op, inParamList, hierarchyManager);
 }
 
 /*!
